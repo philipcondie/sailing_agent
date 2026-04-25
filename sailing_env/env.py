@@ -1,3 +1,5 @@
+import math
+
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -186,21 +188,21 @@ class SailingEnv(gym.Env):
     # -----------------------------------------------------------------------
 
     def _update_physics(self):
-        """Update boat_speed from heading, wind_direction, and wind_speed.
+        """Update boat_speed using a polar diagram (TWA → speed factor).
 
-        TODO: implement a polar diagram — boat speed as a function of
-        true wind angle (TWA = angle between boat heading and wind direction).
+        True wind angle (TWA) is the angle between where the boat points and
+        where the wind comes from, in [0°, 180°] (symmetric port/starboard).
 
-        Typical polar shape:
-            TWA   0–40°   no-go zone: speed ≈ 0
-            TWA  40–50°   upwind VMG: ~50–60% of wind speed
-            TWA  90°      beam reach: ~80–100% of wind speed (often peak)
-            TWA 120–150°  broad reach: ~70–90%
-            TWA 180°      dead run: ~50–60% (slower than beam)
-
-        Also consider: momentum / inertia, leeway (sideways drift).
+        Speed factors at key angles:
+            0°   → 0.00  (head to wind)
+            40°  → 0.25  (edge of no-go zone)
+            90°  → 1.00  (beam reach — fastest)
+            150° → 0.70  (broad reach)
+            180° → 0.55  (dead run)
         """
-        pass
+        twa_rad = _wrap_angle(self._boat_heading - self._wind_direction)
+        twa_deg = math.degrees(abs(twa_rad))
+        self._boat_speed = self._wind_speed * _polar_speed(twa_deg)
 
     # -----------------------------------------------------------------------
     # Race logic
@@ -272,6 +274,27 @@ class SailingEnv(gym.Env):
 # ---------------------------------------------------------------------------
 # Utility
 # ---------------------------------------------------------------------------
+
+def _polar_speed(twa_deg: float) -> float:
+    """Speed factor [0, 1] as a function of true wind angle in degrees.
+
+    Continuous at every boundary — no jumps at 40° or 150°.
+
+    Branches:
+        [0,  40°]  no-go zone:      linear ramp 0 → 0.25
+        [40°, 90°] close-haul/beam: sin-based curve 0.25 → 1.0
+        [90°,180°] beam/run:        linear taper 1.0 → 0.55
+    """
+    a = abs(twa_deg)
+    if a < 40.0:
+        return (a / 40.0) * 0.25
+    elif a <= 90.0:
+        t = (a - 40.0) / 50.0
+        return 0.25 + 0.75 * math.sin(math.radians(t * 90.0))
+    else:
+        t = (a - 90.0) / 90.0
+        return 1.0 - 0.45 * t
+
 
 def _wrap_angle(angle: float) -> float:
     """Wrap an angle to [-pi, pi]."""
