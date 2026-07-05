@@ -17,6 +17,10 @@ _START_LINE_HALF_WIDTH = 60.0   # line runs from x=440 to x=560
 _BUOY_POS = np.array([500.0, 900.0], dtype=np.float32)
 _BUOY_RADIUS = 25.0             # within this distance counts as rounded
 
+# Pre-start box: the boat spawns below the line and manoeuvres until the gun.
+_SPAWN_POS = np.array([500.0, 40.0], dtype=np.float32)
+_SPAWN_X_JITTER = 40.0          # random x offset at reset
+
 # ---------------------------------------------------------------------------
 # Simulation parameters
 # ---------------------------------------------------------------------------
@@ -28,18 +32,39 @@ _DT = 1.0                       # seconds per step
 _MAX_STEPS = 3000
 _MAX_DIST = float(np.sqrt(_WORLD_W**2 + _WORLD_H**2))
 
+_PRESTART_SECONDS = 60.0        # starting gun fires this long after reset
+
+# Race states
+STATE_PRE_START = 0             # gun not fired / start line not yet crossed
+STATE_TO_MARK = 1               # racing: head upwind to the buoy
+STATE_TO_FINISH = 2             # buoy rounded: head back to the finish line
+
 
 class SailingEnv(gym.Env):
-    """Sailing race: round the buoy then cross the start/finish line.
+    """Sailing race in three phases: start, round the buoy, finish.
 
-    Observation (7 floats):
+    Race states:
+        0 PRE_START  — boat manoeuvres below the start line waiting for the
+                       gun (fires _PRESTART_SECONDS after reset). The race
+                       begins when the boat crosses the start line (between
+                       the two committee buoys) heading up-course, after the
+                       gun. Crossing before the gun does not count.
+        1 TO_MARK    — head up the course and round the windward buoy.
+        2 TO_FINISH  — head back down and cross the finish line (same line
+                       as the start, crossed in the opposite direction).
+
+    Observation (8 floats):
         boat_heading        [-pi, pi]   rad  (0 = North, clockwise positive)
         boat_speed          [0, 8]      m/s
         wind_direction      [-pi, pi]   rad  (direction wind is coming FROM)
         wind_speed          [0, 12]     m/s
         bearing_to_target   [-pi, pi]   rad  (absolute bearing to current target)
         distance_to_target  [0, max]    m
-        race_state          {0, 1}      0 = head to buoy, 1 = head to finish
+        race_state          {0, 1, 2}   see above
+        seconds_to_gun      [0, 60]     countdown to the starting gun (0 after)
+
+    The bearing/distance target is the start line centre in PRE_START and
+    TO_FINISH, and the buoy in TO_MARK.
 
     Actions (Discrete 3):
         0: turn left
@@ -47,7 +72,7 @@ class SailingEnv(gym.Env):
         2: hold course
 
     Termination:
-        Boat crosses the finish line after rounding the buoy.
+        Boat crosses the finish line (downward) after rounding the buoy.
 
     Truncation:
         Step count exceeds _MAX_STEPS.
@@ -63,8 +88,8 @@ class SailingEnv(gym.Env):
         # --- Action / observation spaces -----------------------------------
         self.action_space = spaces.Discrete(3)
 
-        obs_low  = np.array([-np.pi, 0.0,          -np.pi, 0.0,          -np.pi, 0.0,    0.0], dtype=np.float32)
-        obs_high = np.array([ np.pi, _MAX_BOAT_SPEED, np.pi, _MAX_WIND_SPEED, np.pi, _MAX_DIST, 1.0], dtype=np.float32)
+        obs_low  = np.array([-np.pi, 0.0,          -np.pi, 0.0,          -np.pi, 0.0,    0.0, 0.0], dtype=np.float32)
+        obs_high = np.array([ np.pi, _MAX_BOAT_SPEED, np.pi, _MAX_WIND_SPEED, np.pi, _MAX_DIST, 2.0, _PRESTART_SECONDS], dtype=np.float32)
         self.observation_space = spaces.Box(obs_low, obs_high, dtype=np.float32)
 
         # --- Internal state (set properly in reset) ------------------------
@@ -74,7 +99,7 @@ class SailingEnv(gym.Env):
         self._boat_speed:    float = 0.0
         self._wind_direction: float = 0.0
         self._wind_speed:    float = 0.0
-        self._race_state:    int = 0    # 0=to buoy, 1=to finish
+        self._race_state:    int = STATE_PRE_START
         self._step_count:    int = 0
 
         self._renderer = None
@@ -86,11 +111,14 @@ class SailingEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        self._boat_pos      = _START_LINE_CENTER.copy()
+        self._boat_pos      = _SPAWN_POS.copy()
+        self._boat_pos[0]  += float(
+            self.np_random.uniform(-_SPAWN_X_JITTER, _SPAWN_X_JITTER)
+        )
         self._prev_boat_pos = self._boat_pos.copy()
-        self._boat_heading  = 0.0   # facing North toward the buoy
+        self._boat_heading  = 0.0   # facing North, toward the start line
         self._boat_speed    = 0.0
-        self._race_state    = 0
+        self._race_state    = STATE_PRE_START
         self._step_count    = 0
 
         self._wind_direction = float(self.np_random.uniform(-np.pi, np.pi))
@@ -126,18 +154,29 @@ class SailingEnv(gym.Env):
 
         self._step_count += 1
 
-        # Race progress
+        # Race progress: PRE_START -> TO_MARK -> TO_FINISH -> terminated
+        started = False
         rounded = False
-        if self._race_state == 0 and self._near_buoy():
-            self._race_state = 1
-            rounded = True
+        terminated = False
 
-        terminated = (
-            self._race_state == 1 and self._crossed_finish_line()
-        )
+        if self._race_state == STATE_PRE_START:
+            # The start only counts after the gun and crossing up-course.
+            # An early crossing is simply ignored: the boat is still in
+            # PRE_START and must come back and cross again after the gun.
+            if self._gun_fired() and self._crossed_line(upward=True):
+                self._race_state = STATE_TO_MARK
+                started = True
+        elif self._race_state == STATE_TO_MARK:
+            if self._near_buoy():
+                self._race_state = STATE_TO_FINISH
+                rounded = True
+        elif self._race_state == STATE_TO_FINISH:
+            # Finish by re-crossing the line downward (from the course side).
+            terminated = self._crossed_line(upward=False)
+
         truncated = self._step_count >= _MAX_STEPS
 
-        reward = self._compute_reward(terminated, truncated, rounded)
+        reward = self._compute_reward(terminated, truncated, started, rounded)
 
         if self.render_mode == "human":
             self._render_frame()
@@ -158,7 +197,7 @@ class SailingEnv(gym.Env):
     # -----------------------------------------------------------------------
 
     def _get_obs(self) -> np.ndarray:
-        target = _BUOY_POS if self._race_state == 0 else _START_LINE_CENTER
+        target = _BUOY_POS if self._race_state == STATE_TO_MARK else _START_LINE_CENTER
         delta = target - self._boat_pos
         bearing  = float(np.arctan2(delta[0], delta[1]))   # arctan2(E, N) = bearing
         distance = float(np.linalg.norm(delta))
@@ -172,15 +211,18 @@ class SailingEnv(gym.Env):
                 bearing,
                 distance,
                 float(self._race_state),
+                self._seconds_to_gun(),
             ],
             dtype=np.float32,
         )
 
     def _get_info(self) -> dict:
         return {
-            "boat_pos":   self._boat_pos.copy(),
-            "race_state": self._race_state,
-            "step":       self._step_count,
+            "boat_pos":       self._boat_pos.copy(),
+            "race_state":     self._race_state,
+            "step":           self._step_count,
+            "gun_fired":      self._gun_fired(),
+            "seconds_to_gun": self._seconds_to_gun(),
         }
 
     # -----------------------------------------------------------------------
@@ -208,47 +250,67 @@ class SailingEnv(gym.Env):
     # Race logic
     # -----------------------------------------------------------------------
 
+    def _gun_fired(self) -> bool:
+        return self._step_count * _DT >= _PRESTART_SECONDS
+
+    def _seconds_to_gun(self) -> float:
+        return max(0.0, _PRESTART_SECONDS - self._step_count * _DT)
+
     def _near_buoy(self) -> bool:
         return bool(np.linalg.norm(self._boat_pos - _BUOY_POS) <= _BUOY_RADIUS)
 
-    def _crossed_finish_line(self) -> bool:
-        """Detect crossing of the start/finish line segment.
+    def _crossed_line(self, upward: bool) -> bool:
+        """Detect a directed crossing of the start/finish line segment.
 
-        The line is horizontal at y = _START_LINE_CENTER[1],
-        spanning x ∈ [center_x − half_width, center_x + half_width].
+        The line is horizontal at y = _START_LINE_CENTER[1], spanning
+        x ∈ [center_x − half_width, center_x + half_width] between the two
+        committee buoys. `upward=True` requires the boat to cross with y
+        increasing (the start); `upward=False` with y decreasing (the finish).
 
-        TODO: enforce direction (boat must cross from above, i.e. y decreasing)
-        if you want to prevent gaming the finish from the wrong side.
+        The x-range test uses the interpolated point where the track actually
+        intersects the line, so fast diagonal moves are judged correctly.
         """
         x0     = _START_LINE_CENTER[0] - _START_LINE_HALF_WIDTH
         x1     = _START_LINE_CENTER[0] + _START_LINE_HALF_WIDTH
         y_line = _START_LINE_CENTER[1]
 
-        prev_y = float(self._prev_boat_pos[1])
-        curr_y = float(self._boat_pos[1])
-        curr_x = float(self._boat_pos[0])
+        prev = self._prev_boat_pos.astype(np.float64)
+        curr = self._boat_pos.astype(np.float64)
 
-        crossed_y  = (prev_y > y_line) != (curr_y > y_line)
-        in_x_range = x0 <= curr_x <= x1
+        if upward:
+            crossed = prev[1] < y_line <= curr[1]
+        else:
+            crossed = prev[1] > y_line >= curr[1]
+        if not crossed:
+            return False
 
-        return bool(crossed_y and in_x_range)
+        # x where the track segment intersects y = y_line
+        t = (y_line - prev[1]) / (curr[1] - prev[1])
+        cross_x = prev[0] + t * (curr[0] - prev[0])
+
+        return bool(x0 <= cross_x <= x1)
 
     # -----------------------------------------------------------------------
     # Reward
     # -----------------------------------------------------------------------
 
-    def _compute_reward(self, terminated: bool, truncated: bool, rounded: bool) -> float:
+    def _compute_reward(
+        self, terminated: bool, truncated: bool, started: bool, rounded: bool
+    ) -> float:
         """Compute the step reward.
 
         TODO: tune / extend reward shaping. Possible additions:
             - Progress shaping: delta distance to target each step
             - Out-of-bounds penalty (boat leaves _WORLD_W x _WORLD_H)
             - Reward for VMG (velocity made good toward target)
+            - Penalty scaled by how late the boat starts after the gun
         """
         if terminated:
             return 100.0    # finished the race
         if rounded:
             return 20.0     # buoy rounded
+        if started:
+            return 10.0     # crossed the start line after the gun
         if truncated:
             return 0.0      # timeout — neutral; tweak if needed
         return -0.05        # small time penalty encourages efficiency
