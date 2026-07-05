@@ -68,14 +68,14 @@ def test_full_race_sequence():
     env._boat_pos = np.array([500.0, 95.0], dtype=np.float32)
     obs, reward, _, _, info = env.step(2)
     assert info["race_state"] == STATE_TO_MARK
-    assert reward == 10.0
+    assert 9.0 < reward < 11.0        # start bonus (+ shaping/time terms)
     assert abs(obs[4]) < 0.1          # bearing target is now the buoy (North)
 
     # Reaching the buoy switches to the finish leg.
     env._boat_pos = BUOY_POS + np.array([0.0, -30.0], dtype=np.float32)
     obs, reward, _, _, info = env.step(2)
     assert info["race_state"] == STATE_TO_FINISH
-    assert reward == 20.0
+    assert 19.0 < reward < 21.0       # rounding bonus (+ shaping/time terms)
     assert abs(abs(obs[4]) - np.pi) < 0.2   # target is the finish line (South)
 
     # Crossing the line upward on the finish leg does not finish.
@@ -86,9 +86,36 @@ def test_full_race_sequence():
     # Crossing downward finishes the race.
     env._boat_heading = np.pi
     env._boat_pos = np.array([500.0, 105.0], dtype=np.float32)
-    _, reward, terminated, _, _ = env.step(2)
+    _, reward, terminated, _, info = env.step(2)
     assert terminated
-    assert reward == 100.0
+    assert not info["out_of_bounds"]
+    assert 99.0 < reward < 101.0      # finish bonus (+ shaping/time terms)
+
+
+def test_out_of_bounds_terminates_with_penalty():
+    env = _rigged_env()
+    env._boat_heading = np.pi                  # sail South, off the map
+    env._boat_pos = np.array([500.0, 5.0], dtype=np.float32)
+    _, reward, terminated, _, info = env.step(2)
+    assert terminated
+    assert info["out_of_bounds"]
+    assert reward < -19.0                      # OOB penalty dominates
+
+
+def test_progress_shaping_rewards_closing_on_target():
+    env = _rigged_env()
+    env._race_state = 1                        # TO_MARK: target is the buoy
+    env._boat_pos = np.array([500.0, 400.0], dtype=np.float32)
+    _, reward_toward, _, _, _ = env.step(2)    # heading North, closing
+
+    env2 = _rigged_env()
+    env2._race_state = 1
+    env2._boat_heading = np.pi                 # heading South, opening
+    env2._wind_direction = -np.pi / 2          # beam reach again
+    env2._boat_pos = np.array([500.0, 400.0], dtype=np.float32)
+    _, reward_away, _, _, _ = env2.step(2)
+
+    assert reward_toward > 0 > reward_away
 
 
 def test_crossing_outside_committee_buoys_does_not_start():
@@ -103,5 +130,7 @@ if __name__ == "__main__":
     test_api_compliance()
     test_reset_is_pre_start()
     test_full_race_sequence()
+    test_out_of_bounds_terminates_with_penalty()
+    test_progress_shaping_rewards_closing_on_target()
     test_crossing_outside_committee_buoys_does_not_start()
     print("ALL CHECKS PASSED")

@@ -67,7 +67,7 @@ def train(config: DQNConfig, run_dir: Path) -> None:
             ep_start_step = info["step"]
         if ep_round_step < 0 and info["race_state"] >= STATE_TO_FINISH:
             ep_round_step = info["step"]
-        if terminated:
+        if terminated and not info["out_of_bounds"]:
             ep_finish_step = info["step"]
 
         # Truncation is a time limit, not a real terminal state: don't let
@@ -112,6 +112,7 @@ def train(config: DQNConfig, run_dir: Path) -> None:
                 "mean_q": round(float(np.mean(ep_qs)), 4) if ep_qs else math.nan,
                 "wind_speed": round(float(env.unwrapped._wind_speed), 3),
                 "wind_direction": round(float(env.unwrapped._wind_direction), 4),
+                "oob": int(info["out_of_bounds"]),
             }
             logger.episodes.append(row)
             recent.append(row)
@@ -126,6 +127,7 @@ def train(config: DQNConfig, run_dir: Path) -> None:
                     f"started {np.mean([e['started'] for e in r]):.2f}  "
                     f"rounded {np.mean([e['rounded'] for e in r]):.2f}  "
                     f"finished {np.mean([e['finished'] for e in r]):.2f}  "
+                    f"oob {np.mean([e['oob'] for e in r]):.2f}  "
                     f"eps {epsilon:.3f}  {sps:5.0f} steps/s"
                 )
                 recent = r
