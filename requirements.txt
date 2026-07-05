@@ -1,4 +1,6 @@
 gymnasium>=0.29
 numpy>=1.24
-stable-baselines3>=2.3
-pygame>=2.5          # for rendering
+torch>=2.2
+matplotlib>=3.8      # analysis/plots.py
+pygame>=2.5          # for rendering (optional)
+pytest>=8.0          # tests
