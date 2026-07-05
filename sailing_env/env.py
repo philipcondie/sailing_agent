@@ -8,31 +8,31 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Course layout  (metres, x = East, y = North)
 # ---------------------------------------------------------------------------
-_WORLD_W = 1000.0
-_WORLD_H = 1200.0
+WORLD_W = 1000.0
+WORLD_H = 1200.0
 
-_START_LINE_CENTER = np.array([500.0, 100.0], dtype=np.float32)
-_START_LINE_HALF_WIDTH = 60.0   # line runs from x=440 to x=560
+START_LINE_CENTER = np.array([500.0, 100.0], dtype=np.float32)
+START_LINE_HALF_WIDTH = 60.0   # line runs from x=440 to x=560
 
-_BUOY_POS = np.array([500.0, 900.0], dtype=np.float32)
-_BUOY_RADIUS = 25.0             # within this distance counts as rounded
+BUOY_POS = np.array([500.0, 900.0], dtype=np.float32)
+BUOY_RADIUS = 25.0             # within this distance counts as rounded
 
 # Pre-start box: the boat spawns below the line and manoeuvres until the gun.
-_SPAWN_POS = np.array([500.0, 40.0], dtype=np.float32)
-_SPAWN_X_JITTER = 40.0          # random x offset at reset
+SPAWN_POS = np.array([500.0, 40.0], dtype=np.float32)
+SPAWN_X_JITTER = 40.0          # random x offset at reset
 
 # ---------------------------------------------------------------------------
 # Simulation parameters
 # ---------------------------------------------------------------------------
-_MAX_BOAT_SPEED = 8.0           # m/s (~16 knots)
-_MAX_WIND_SPEED = 12.0          # m/s (~23 knots)
-_WIND_SPEED_RANGE = (4.0, 12.0)
-_TURN_RATE = 0.08               # rad per step
-_DT = 1.0                       # seconds per step
-_MAX_STEPS = 3000
-_MAX_DIST = float(np.sqrt(_WORLD_W**2 + _WORLD_H**2))
+MAX_BOAT_SPEED = 8.0           # m/s (~16 knots)
+MAX_WIND_SPEED = 12.0          # m/s (~23 knots)
+WIND_SPEED_RANGE = (4.0, 12.0)
+TURN_RATE = 0.08               # rad per step
+DT = 1.0                       # seconds per step
+MAX_STEPS = 3000
+MAX_DIST = float(np.sqrt(WORLD_W**2 + WORLD_H**2))
 
-_PRESTART_SECONDS = 60.0        # starting gun fires this long after reset
+PRESTART_SECONDS = 60.0        # starting gun fires this long after reset
 
 # Race states
 STATE_PRE_START = 0             # gun not fired / start line not yet crossed
@@ -45,7 +45,7 @@ class SailingEnv(gym.Env):
 
     Race states:
         0 PRE_START  — boat manoeuvres below the start line waiting for the
-                       gun (fires _PRESTART_SECONDS after reset). The race
+                       gun (fires PRESTART_SECONDS after reset). The race
                        begins when the boat crosses the start line (between
                        the two committee buoys) heading up-course, after the
                        gun. Crossing before the gun does not count.
@@ -75,7 +75,7 @@ class SailingEnv(gym.Env):
         Boat crosses the finish line (downward) after rounding the buoy.
 
     Truncation:
-        Step count exceeds _MAX_STEPS.
+        Step count exceeds MAX_STEPS.
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
@@ -89,7 +89,7 @@ class SailingEnv(gym.Env):
         self.action_space = spaces.Discrete(3)
 
         obs_low  = np.array([-np.pi, 0.0,          -np.pi, 0.0,          -np.pi, 0.0,    0.0, 0.0], dtype=np.float32)
-        obs_high = np.array([ np.pi, _MAX_BOAT_SPEED, np.pi, _MAX_WIND_SPEED, np.pi, _MAX_DIST, 2.0, _PRESTART_SECONDS], dtype=np.float32)
+        obs_high = np.array([ np.pi, MAX_BOAT_SPEED, np.pi, MAX_WIND_SPEED, np.pi, MAX_DIST, 2.0, PRESTART_SECONDS], dtype=np.float32)
         self.observation_space = spaces.Box(obs_low, obs_high, dtype=np.float32)
 
         # --- Internal state (set properly in reset) ------------------------
@@ -111,9 +111,9 @@ class SailingEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        self._boat_pos      = _SPAWN_POS.copy()
+        self._boat_pos      = SPAWN_POS.copy()
         self._boat_pos[0]  += float(
-            self.np_random.uniform(-_SPAWN_X_JITTER, _SPAWN_X_JITTER)
+            self.np_random.uniform(-SPAWN_X_JITTER, SPAWN_X_JITTER)
         )
         self._prev_boat_pos = self._boat_pos.copy()
         self._boat_heading  = 0.0   # facing North, toward the start line
@@ -122,7 +122,7 @@ class SailingEnv(gym.Env):
         self._step_count    = 0
 
         self._wind_direction = float(self.np_random.uniform(-np.pi, np.pi))
-        self._wind_speed     = float(self.np_random.uniform(*_WIND_SPEED_RANGE))
+        self._wind_speed     = float(self.np_random.uniform(*WIND_SPEED_RANGE))
 
         if self.render_mode == "human":
             self._render_frame()
@@ -136,20 +136,19 @@ class SailingEnv(gym.Env):
 
         # Steering
         if action == 0:
-            self._boat_heading -= _TURN_RATE
+            self._boat_heading -= TURN_RATE
         elif action == 1:
-            self._boat_heading += _TURN_RATE
+            self._boat_heading += TURN_RATE
         # action == 2: hold course
 
         self._boat_heading = _wrap_angle(self._boat_heading)
 
-        # Physics (implement here)
         self._update_physics()
 
         # Dead-reckoning position update
         self._boat_pos = (
             self._boat_pos
-            + _heading_to_vec(self._boat_heading) * self._boat_speed * _DT
+            + _heading_to_vec(self._boat_heading) * self._boat_speed * DT
         )
 
         self._step_count += 1
@@ -174,7 +173,7 @@ class SailingEnv(gym.Env):
             # Finish by re-crossing the line downward (from the course side).
             terminated = self._crossed_line(upward=False)
 
-        truncated = self._step_count >= _MAX_STEPS
+        truncated = self._step_count >= MAX_STEPS
 
         reward = self._compute_reward(terminated, truncated, started, rounded)
 
@@ -197,7 +196,7 @@ class SailingEnv(gym.Env):
     # -----------------------------------------------------------------------
 
     def _get_obs(self) -> np.ndarray:
-        target = _BUOY_POS if self._race_state == STATE_TO_MARK else _START_LINE_CENTER
+        target = BUOY_POS if self._race_state == STATE_TO_MARK else START_LINE_CENTER
         delta = target - self._boat_pos
         bearing  = float(np.arctan2(delta[0], delta[1]))   # arctan2(E, N) = bearing
         distance = float(np.linalg.norm(delta))
@@ -226,7 +225,7 @@ class SailingEnv(gym.Env):
         }
 
     # -----------------------------------------------------------------------
-    # Physics stub
+    # Physics
     # -----------------------------------------------------------------------
 
     def _update_physics(self):
@@ -251,18 +250,18 @@ class SailingEnv(gym.Env):
     # -----------------------------------------------------------------------
 
     def _gun_fired(self) -> bool:
-        return self._step_count * _DT >= _PRESTART_SECONDS
+        return self._step_count * DT >= PRESTART_SECONDS
 
     def _seconds_to_gun(self) -> float:
-        return max(0.0, _PRESTART_SECONDS - self._step_count * _DT)
+        return max(0.0, PRESTART_SECONDS - self._step_count * DT)
 
     def _near_buoy(self) -> bool:
-        return bool(np.linalg.norm(self._boat_pos - _BUOY_POS) <= _BUOY_RADIUS)
+        return bool(np.linalg.norm(self._boat_pos - BUOY_POS) <= BUOY_RADIUS)
 
     def _crossed_line(self, upward: bool) -> bool:
         """Detect a directed crossing of the start/finish line segment.
 
-        The line is horizontal at y = _START_LINE_CENTER[1], spanning
+        The line is horizontal at y = START_LINE_CENTER[1], spanning
         x ∈ [center_x − half_width, center_x + half_width] between the two
         committee buoys. `upward=True` requires the boat to cross with y
         increasing (the start); `upward=False` with y decreasing (the finish).
@@ -270,9 +269,9 @@ class SailingEnv(gym.Env):
         The x-range test uses the interpolated point where the track actually
         intersects the line, so fast diagonal moves are judged correctly.
         """
-        x0     = _START_LINE_CENTER[0] - _START_LINE_HALF_WIDTH
-        x1     = _START_LINE_CENTER[0] + _START_LINE_HALF_WIDTH
-        y_line = _START_LINE_CENTER[1]
+        x0     = START_LINE_CENTER[0] - START_LINE_HALF_WIDTH
+        x1     = START_LINE_CENTER[0] + START_LINE_HALF_WIDTH
+        y_line = START_LINE_CENTER[1]
 
         prev = self._prev_boat_pos.astype(np.float64)
         curr = self._boat_pos.astype(np.float64)
@@ -301,7 +300,7 @@ class SailingEnv(gym.Env):
 
         TODO: tune / extend reward shaping. Possible additions:
             - Progress shaping: delta distance to target each step
-            - Out-of-bounds penalty (boat leaves _WORLD_W x _WORLD_H)
+            - Out-of-bounds penalty (boat leaves WORLD_W x WORLD_H)
             - Reward for VMG (velocity made good toward target)
             - Penalty scaled by how late the boat starts after the gun
         """
@@ -323,9 +322,9 @@ class SailingEnv(gym.Env):
         """TODO: implement pygame visualisation.
 
         Suggested elements:
-            - Blue water background (_WORLD_W × _WORLD_H viewport)
+            - Blue water background (WORLD_W × WORLD_H viewport)
             - Start/finish line (white dashed)
-            - Buoy marker (red circle at _BUOY_POS)
+            - Buoy marker (red circle at BUOY_POS)
             - Boat (triangle pointing in self._boat_heading direction)
             - Wind arrow (direction + speed HUD)
             - Race state label and step counter

@@ -17,9 +17,9 @@ from sailing_env.env import (
     STATE_PRE_START,
     STATE_TO_MARK,
     STATE_TO_FINISH,
-    _PRESTART_SECONDS,
-    _START_LINE_CENTER,
-    _BUOY_POS,
+    PRESTART_SECONDS,
+    START_LINE_CENTER,
+    BUOY_POS,
 )
 
 
@@ -31,8 +31,8 @@ def test_reset_is_pre_start():
     env = SailingEnv()
     obs, info = env.reset(seed=42)
     assert info["race_state"] == STATE_PRE_START
-    assert info["boat_pos"][1] < _START_LINE_CENTER[1]   # below the line
-    assert obs[7] == _PRESTART_SECONDS                   # full countdown
+    assert info["boat_pos"][1] < START_LINE_CENTER[1]   # below the line
+    assert obs[7] == PRESTART_SECONDS                   # full countdown
     assert not info["gun_fired"]
 
 
@@ -52,7 +52,7 @@ def test_full_race_sequence():
     # Crossing the line before the gun does not start the race.
     env._boat_pos = np.array([500.0, 95.0], dtype=np.float32)
     _, _, _, _, info = env.step(2)
-    assert env._boat_pos[1] > _START_LINE_CENTER[1]
+    assert env._boat_pos[1] > START_LINE_CENTER[1]
     assert info["race_state"] == STATE_PRE_START
 
     # Park below the line until the gun fires.
@@ -72,7 +72,7 @@ def test_full_race_sequence():
     assert abs(obs[4]) < 0.1          # bearing target is now the buoy (North)
 
     # Reaching the buoy switches to the finish leg.
-    env._boat_pos = _BUOY_POS + np.array([0.0, -30.0], dtype=np.float32)
+    env._boat_pos = BUOY_POS + np.array([0.0, -30.0], dtype=np.float32)
     obs, reward, _, _, info = env.step(2)
     assert info["race_state"] == STATE_TO_FINISH
     assert reward == 20.0
@@ -93,7 +93,7 @@ def test_full_race_sequence():
 
 def test_crossing_outside_committee_buoys_does_not_start():
     env = _rigged_env(seed=1)
-    env._step_count = int(_PRESTART_SECONDS) + 1        # gun already fired
+    env._step_count = int(PRESTART_SECONDS) + 1        # gun already fired
     env._boat_pos = np.array([300.0, 95.0], dtype=np.float32)  # left of line
     _, _, _, _, info = env.step(2)
     assert info["race_state"] == STATE_PRE_START
