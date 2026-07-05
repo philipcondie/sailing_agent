@@ -1,0 +1,4 @@
+gymnasium>=0.29
+numpy>=1.24
+stable-baselines3>=2.3
+pygame>=2.5          # for rendering
