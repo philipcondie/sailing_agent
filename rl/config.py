@@ -30,7 +30,7 @@ class DQNConfig:
     # Epsilon-greedy exploration (linear decay)
     eps_start: float = 1.0
     eps_end: float = 0.05
-    eps_decay_steps: int = 100_000
+    eps_decay_steps: int = 200_000
 
     # Network
     hidden_sizes: tuple = (128, 128)

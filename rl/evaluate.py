@@ -50,7 +50,7 @@ def run_episode(env, agent, seed: int | None = None) -> dict:
         })
         started = started or info["race_state"] >= 1
         rounded = rounded or info["race_state"] >= 2
-        finished = finished or terminated
+        finished = finished or (terminated and not info["out_of_bounds"])
 
     # Final position so the plotted track reaches the finish.
     steps.append({
@@ -70,6 +70,7 @@ def run_episode(env, agent, seed: int | None = None) -> dict:
             "started": started,
             "rounded": rounded,
             "finished": finished,
+            "out_of_bounds": bool(info["out_of_bounds"]),
             "steps": len(steps) - 1,
             "total_reward": total_reward,
         },

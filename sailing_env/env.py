@@ -34,6 +34,16 @@ MAX_DIST = float(np.sqrt(WORLD_W**2 + WORLD_H**2))
 
 PRESTART_SECONDS = 60.0        # starting gun fires this long after reset
 
+# ---------------------------------------------------------------------------
+# Reward components
+# ---------------------------------------------------------------------------
+STEP_PENALTY = -0.05            # per step, encourages finishing quickly
+PROGRESS_REWARD_PER_M = 0.01    # per metre of progress toward the leg target
+START_BONUS = 10.0
+ROUNDING_BONUS = 20.0
+FINISH_BONUS = 100.0
+OUT_OF_BOUNDS_PENALTY = -20.0   # leaving the race area (also terminates)
+
 # Race states
 STATE_PRE_START = 0             # gun not fired / start line not yet crossed
 STATE_TO_MARK = 1               # racing: head upwind to the buoy
@@ -71,8 +81,14 @@ class SailingEnv(gym.Env):
         1: turn right
         2: hold course
 
+    Rewards (additive per step):
+        -0.05 time penalty; +0.01 per metre of progress toward the current
+        leg's target; +10 start, +20 rounding, +100 finish; -20 for leaving
+        the race area.
+
     Termination:
-        Boat crosses the finish line (downward) after rounding the buoy.
+        Boat crosses the finish line (downward) after rounding the buoy,
+        or leaves the WORLD_W x WORLD_H race area (out of bounds, penalised).
 
     Truncation:
         Step count exceeds MAX_STEPS.
@@ -101,6 +117,7 @@ class SailingEnv(gym.Env):
         self._wind_speed:    float = 0.0
         self._race_state:    int = STATE_PRE_START
         self._step_count:    int = 0
+        self._out_of_bounds: bool = False
 
         self._renderer = None
 
@@ -120,6 +137,7 @@ class SailingEnv(gym.Env):
         self._boat_speed    = 0.0
         self._race_state    = STATE_PRE_START
         self._step_count    = 0
+        self._out_of_bounds = False
 
         self._wind_direction = float(self.np_random.uniform(-np.pi, np.pi))
         self._wind_speed     = float(self.np_random.uniform(*WIND_SPEED_RANGE))
@@ -153,10 +171,19 @@ class SailingEnv(gym.Env):
 
         self._step_count += 1
 
-        # Race progress: PRE_START -> TO_MARK -> TO_FINISH -> terminated
+        # Progress toward the current leg's target, for reward shaping.
+        # Measured against the state at the start of the step so a phase
+        # transition never produces a spurious distance jump.
+        target = self._current_target()
+        progress = float(
+            np.linalg.norm(self._prev_boat_pos - target)
+            - np.linalg.norm(self._boat_pos - target)
+        )
+
+        # Race progress: PRE_START -> TO_MARK -> TO_FINISH -> finished
         started = False
         rounded = False
-        terminated = False
+        finished = False
 
         if self._race_state == STATE_PRE_START:
             # The start only counts after the gun and crossing up-course.
@@ -171,11 +198,19 @@ class SailingEnv(gym.Env):
                 rounded = True
         elif self._race_state == STATE_TO_FINISH:
             # Finish by re-crossing the line downward (from the course side).
-            terminated = self._crossed_line(upward=False)
+            finished = self._crossed_line(upward=False)
 
+        self._out_of_bounds = bool(
+            not (0.0 <= self._boat_pos[0] <= WORLD_W)
+            or not (0.0 <= self._boat_pos[1] <= WORLD_H)
+        )
+
+        terminated = finished or self._out_of_bounds
         truncated = self._step_count >= MAX_STEPS
 
-        reward = self._compute_reward(terminated, truncated, started, rounded)
+        reward = self._compute_reward(
+            finished, self._out_of_bounds, started, rounded, progress
+        )
 
         if self.render_mode == "human":
             self._render_frame()
@@ -195,8 +230,12 @@ class SailingEnv(gym.Env):
     # Observation / info
     # -----------------------------------------------------------------------
 
+    def _current_target(self) -> np.ndarray:
+        """Navigation target of the current leg (line centre or buoy)."""
+        return BUOY_POS if self._race_state == STATE_TO_MARK else START_LINE_CENTER
+
     def _get_obs(self) -> np.ndarray:
-        target = BUOY_POS if self._race_state == STATE_TO_MARK else START_LINE_CENTER
+        target = self._current_target()
         delta = target - self._boat_pos
         bearing  = float(np.arctan2(delta[0], delta[1]))   # arctan2(E, N) = bearing
         distance = float(np.linalg.norm(delta))
@@ -222,6 +261,7 @@ class SailingEnv(gym.Env):
             "step":           self._step_count,
             "gun_fired":      self._gun_fired(),
             "seconds_to_gun": self._seconds_to_gun(),
+            "out_of_bounds":  self._out_of_bounds,
         }
 
     # -----------------------------------------------------------------------
@@ -294,25 +334,36 @@ class SailingEnv(gym.Env):
     # -----------------------------------------------------------------------
 
     def _compute_reward(
-        self, terminated: bool, truncated: bool, started: bool, rounded: bool
+        self,
+        finished: bool,
+        out_of_bounds: bool,
+        started: bool,
+        rounded: bool,
+        progress: float,
     ) -> float:
         """Compute the step reward.
 
-        TODO: tune / extend reward shaping. Possible additions:
-            - Progress shaping: delta distance to target each step
-            - Out-of-bounds penalty (boat leaves WORLD_W x WORLD_H)
-            - Reward for VMG (velocity made good toward target)
-            - Penalty scaled by how late the boat starts after the gun
+        Components (additive):
+            time penalty        every step, encourages efficiency
+            progress shaping    metres of progress toward the current leg's
+                                target — dense signal pulling the boat down
+                                the course between the sparse phase bonuses
+            phase bonuses       start / rounding / finish
+            out-of-bounds       leaving the race area ends the episode
+
+        TODO possible extensions: VMG-based shaping, penalty scaled by how
+        late the boat starts after the gun.
         """
-        if terminated:
-            return 100.0    # finished the race
-        if rounded:
-            return 20.0     # buoy rounded
+        reward = STEP_PENALTY + PROGRESS_REWARD_PER_M * progress
         if started:
-            return 10.0     # crossed the start line after the gun
-        if truncated:
-            return 0.0      # timeout — neutral; tweak if needed
-        return -0.05        # small time penalty encourages efficiency
+            reward += START_BONUS
+        if rounded:
+            reward += ROUNDING_BONUS
+        if finished:
+            reward += FINISH_BONUS
+        if out_of_bounds:
+            reward += OUT_OF_BOUNDS_PENALTY
+        return reward
 
     # -----------------------------------------------------------------------
     # Rendering stub

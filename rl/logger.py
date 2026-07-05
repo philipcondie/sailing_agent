@@ -36,6 +36,7 @@ class RunLogger:
         "started", "rounded", "finished",
         "start_step", "round_step", "finish_step",
         "epsilon", "mean_loss", "mean_q", "wind_speed", "wind_direction",
+        "oob",
     ]
     TRAINING_COLUMNS = [
         "global_step", "loss", "mean_q", "max_q", "epsilon", "buffer_fill",
