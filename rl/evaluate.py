@@ -17,14 +17,17 @@ from sailing_env.wrappers import NormalizeObservation
 from rl.config import DQNConfig
 
 
-def run_episode(env, agent, seed: int | None = None) -> dict:
+def run_episode(env, agent, seed: int | None = None,
+                options: dict | None = None) -> dict:
     """Roll out one greedy episode; returns a trajectory dict.
 
     The env must be a NormalizeObservation-wrapped SailingEnv: the agent
     sees normalized observations while positions/wind for the trajectory
-    come from the underlying env's info dict.
+    come from the underlying env's info dict. `options` is forwarded to
+    env.reset — e.g. {"wind_direction": 0.0, "wind_speed": 8.0} pins the
+    wind for controlled evaluation (see analysis/wind_sweep.py).
     """
-    obs, info = env.reset(seed=seed)
+    obs, info = env.reset(seed=seed, options=options)
     raw = env.unwrapped
 
     steps = []
