@@ -47,6 +47,7 @@ rl/                     from-scratch DQN (PyTorch)
   evaluate.py           greedy rollouts with trajectory capture (also a CLI)
 analysis/
   plots.py              turns a run directory into diagnostic PNGs
+  animate.py            renders a captured trajectory as a GIF/MP4 of the race
 train.py                training loop
 tests/                  environment + RL unit tests
 ```
@@ -76,6 +77,10 @@ Useful flags for quick experiments: `--total-steps`, `--learning-starts`,
 ```bash
 python analysis/plots.py runs/my-first-run          # writes PNGs to runs/my-first-run/plots/
 python -m rl.evaluate runs/my-first-run/checkpoints/ckpt_50000.pt --episodes 5
+
+# animate a captured episode (GIF for the blog post; also writes .mp4):
+python analysis/animate.py runs/my-first-run                  # latest eval, episode 0
+python analysis/animate.py runs/my-first-run/eval/traj_step500000_ep0.json --out race.gif
 ```
 
 The plots include the learning curve, the rolling fraction of episodes that
