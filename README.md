@@ -19,7 +19,10 @@ The course models a real (single-handed, one-lap) regatta in three phases:
    opposite direction.
 
 The boat's speed comes from a polar diagram: pointing into the wind stalls
-it (the "no-go zone"), a beam reach is fastest, dead downwind is slow. Wind
+it (the "no-go zone"), a beam reach is fastest, dead downwind is slow. The
+boat has momentum, though — speed eases toward that polar target rather
+than snapping to it, so it accelerates gradually from a standstill and
+coasts through the no-go zone during a tack instead of stopping dead. Wind
 direction and strength are randomized every episode, so an upwind mark on
 one episode may be a downwind mark on the next.
 

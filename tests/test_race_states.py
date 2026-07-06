@@ -20,6 +20,7 @@ from sailing_env.env import (
     PRESTART_SECONDS,
     START_LINE_CENTER,
     BUOY_POS,
+    BOAT_ACCEL,
 )
 
 
@@ -37,12 +38,18 @@ def test_reset_is_pre_start():
 
 
 def _rigged_env(seed=42):
-    """Env with the boat heading North on a beam reach (10 m/s per step)."""
+    """Env with the boat heading North on a beam reach (10 m/s per step).
+
+    Speed now has momentum (BOAT_ACCEL lag toward the polar target), so
+    tests that teleport the boat and expect immediate 10 m/step movement
+    pin ``_boat_speed`` directly rather than relying on the wind alone.
+    """
     env = SailingEnv()
     env.reset(seed=seed)
     env._wind_direction = np.pi / 2   # wind from the East -> TWA 90 heading N
     env._wind_speed = 10.0
     env._boat_heading = 0.0
+    env._boat_speed = 10.0
     return env
 
 
@@ -65,6 +72,7 @@ def test_full_race_sequence():
 
     # Crossing after the gun starts the race.
     env._wind_speed = 10.0
+    env._boat_speed = 10.0     # boat has momentum: pin it back up to speed
     env._boat_pos = np.array([500.0, 95.0], dtype=np.float32)
     obs, reward, _, _, info = env.step(2)
     assert info["race_state"] == STATE_TO_MARK
@@ -125,7 +133,7 @@ def test_no_go_zone_penalized():
     env._boat_pos = np.array([500.0, 400.0], dtype=np.float32)
     _, reward_pinching, _, _, info = env.step(2)
     assert info["in_no_go"]
-    assert env._boat_speed < 3.0               # stalled
+    assert env._boat_speed < 10.0              # bleeding speed in irons
 
     env2 = _rigged_env()                       # beam reach, same spot
     env2._race_state = 1
@@ -146,6 +154,37 @@ def test_reset_options_pin_the_wind():
     assert not (obs[2] == np.float32(0.5) and obs[3] == np.float32(9.0))
 
 
+def test_boat_accelerates_gradually():
+    """Speed has momentum: it eases toward the polar target instead of
+    snapping to it, so a beam reach builds up gradually from a standstill.
+
+    reset() spawns the boat facing North (heading 0) at a random x, so a
+    wind from the East puts it on a beam reach (TWA 90) immediately.
+    """
+    env = SailingEnv()
+    env.reset(seed=7)
+    env._wind_direction = np.pi / 2   # wind from the East -> TWA 90 at heading 0
+    env._wind_speed = 10.0
+    assert env._boat_speed == 0.0      # reset() starts the boat at rest
+
+    env.step(2)                        # hold course
+    first_step_speed = env._boat_speed
+    expected_first_step = 10.0 * BOAT_ACCEL   # gap (10 - 0) closed by BOAT_ACCEL
+    assert abs(first_step_speed - expected_first_step) < 1e-5
+    assert 0.0 < first_step_speed < 5.0   # well below the ~10 m/s polar target
+
+    speeds = [first_step_speed]
+    for _ in range(20):
+        env.step(2)
+        speeds.append(env._boat_speed)
+
+    # Monotonically increasing, closing in on (never overshooting) the target.
+    assert all(b >= a - 1e-9 for a, b in zip(speeds, speeds[1:]))
+    assert speeds[-1] > speeds[0]
+    assert speeds[-1] <= 10.0 + 1e-6
+    assert speeds[-1] > 7.0             # well on its way to the ~10 m/s target
+
+
 def test_crossing_outside_committee_buoys_does_not_start():
     env = _rigged_env(seed=1)
     env._step_count = int(PRESTART_SECONDS) + 1        # gun already fired
@@ -160,5 +199,6 @@ if __name__ == "__main__":
     test_full_race_sequence()
     test_out_of_bounds_terminates_with_penalty()
     test_progress_shaping_rewards_closing_on_target()
+    test_boat_accelerates_gradually()
     test_crossing_outside_committee_buoys_does_not_start()
     print("ALL CHECKS PASSED")

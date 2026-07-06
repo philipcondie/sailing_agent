@@ -30,6 +30,10 @@ WIND_SPEED_RANGE = (4.0, 12.0)
 NO_GO_TWA_DEG = 40.0           # closer than this to the wind the boat stalls
 TURN_RATE = 0.08               # rad per step
 DT = 1.0                       # seconds per step
+BOAT_ACCEL = 0.15              # fraction of the speed gap closed per second
+                                # (first-order lag toward the polar target
+                                # speed — the boat has momentum instead of
+                                # teleporting to hull speed)
 MAX_STEPS = 3000
 MAX_DIST = float(np.sqrt(WORLD_W**2 + WORLD_H**2))
 
@@ -87,6 +91,16 @@ class SailingEnv(gym.Env):
         -0.05 time penalty; +0.01 per metre of progress toward the current
         leg's target; -0.05 while pinching inside the no-go zone (TWA < 40°);
         +10 start, +20 rounding, +100 finish; -20 for leaving the race area.
+
+    Physics:
+        Boat speed is not instantaneous — it has momentum. Each step it
+        eases toward the polar-diagram target speed for the current true
+        wind angle (BOAT_ACCEL fraction of the gap closed per second), so
+        the boat accelerates gradually from a standstill rather than
+        teleporting to hull speed. This also means a tack *coasts* through
+        the no-go zone instead of stopping dead: turning through head-to-wind
+        costs speed but is survivable, mirroring the real tradeoff. If the
+        boat lingers head-to-wind, speed keeps bleeding toward zero.
 
     Termination:
         Boat crosses the finish line (downward) after rounding the buoy,
@@ -295,11 +309,20 @@ class SailingEnv(gym.Env):
             90°  → 1.00  (beam reach — fastest)
             150° → 0.70  (broad reach)
             180° → 0.55  (dead run)
+
+        The polar diagram only gives a *target* speed; the boat has
+        momentum and eases toward it with a first-order lag (BOAT_ACCEL
+        fraction of the gap closed per second) rather than snapping to it
+        instantly. Practically: the boat accelerates gradually from a
+        standstill, a tack coasts through the no-go zone instead of
+        stalling dead (costing speed rather than all of it at once), and
+        speed keeps bleeding toward zero if the boat lingers head-to-wind.
         """
         twa_rad = _wrap_angle(self._boat_heading - self._wind_direction)
         twa_deg = math.degrees(abs(twa_rad))
         self._in_no_go = twa_deg < NO_GO_TWA_DEG
-        self._boat_speed = self._wind_speed * _polar_speed(twa_deg)
+        target_speed = self._wind_speed * _polar_speed(twa_deg)
+        self._boat_speed += (target_speed - self._boat_speed) * BOAT_ACCEL * DT
 
     # -----------------------------------------------------------------------
     # Race logic
