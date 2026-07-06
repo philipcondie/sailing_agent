@@ -183,6 +183,8 @@ def main():
     parser.add_argument("--eval-interval", type=int, default=None)
     parser.add_argument("--checkpoint-interval", type=int, default=None)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--double-dqn", action="store_true",
+                         help="use Double DQN (van Hasselt et al. 2016) TD targets")
     args = parser.parse_args()
 
     config = DQNConfig()
@@ -192,6 +194,10 @@ def main():
         value = getattr(args, field)
         if value is not None:
             setattr(config, field, value)
+    # store_true flags default to False, which is falsy — handle separately
+    # so we only ever flip the config's default on, never clobber it off.
+    if args.double_dqn:
+        config.double_dqn = True
 
     run_dir = Path("runs") / args.run_name
     if run_dir.exists():

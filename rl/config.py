@@ -35,6 +35,9 @@ class DQNConfig:
     # Network
     hidden_sizes: tuple = (128, 128)
 
+    # Algorithm variants
+    double_dqn: bool = False            # van Hasselt et al. 2016 TD target
+
     # Bookkeeping
     seed: int = 0
     device: str = "cpu"

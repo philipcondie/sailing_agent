@@ -14,6 +14,11 @@ class DQNAgent:
 
     Kept deliberately minimal and readable — one file, no inheritance —
     so the training mechanics are easy to follow and instrument.
+
+    Optionally runs Double DQN (van Hasselt et al. 2016) when
+    ``config.double_dqn`` is set: the online net picks the greedy next
+    action, and the target net evaluates it, decoupling selection from
+    evaluation to curb the max-operator's overestimation bias.
     """
 
     def __init__(self, obs_dim: int, n_actions: int, config: DQNConfig):
@@ -55,7 +60,11 @@ class DQNAgent:
         q_pred = self.q_net(obs).gather(1, actions.unsqueeze(1)).squeeze(1)
 
         with torch.no_grad():
-            next_q = self.target_net(next_obs).max(dim=1).values
+            if self.config.double_dqn:
+                next_actions = self.q_net(next_obs).argmax(dim=1)
+                next_q = self.target_net(next_obs).gather(1, next_actions.unsqueeze(1)).squeeze(1)
+            else:
+                next_q = self.target_net(next_obs).max(dim=1).values
             target = rewards + self.config.gamma * (1.0 - dones) * next_q
 
         loss = F.smooth_l1_loss(q_pred, target)
