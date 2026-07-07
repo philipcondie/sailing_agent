@@ -27,6 +27,7 @@ SPAWN_X_JITTER = 40.0          # random x offset at reset
 MAX_BOAT_SPEED = 8.0           # m/s (~16 knots)
 MAX_WIND_SPEED = 12.0          # m/s (~23 knots)
 WIND_SPEED_RANGE = (4.0, 12.0)
+NO_GO_TWA_DEG = 40.0           # closer than this to the wind the boat stalls
 TURN_RATE = 0.08               # rad per step
 DT = 1.0                       # seconds per step
 MAX_STEPS = 3000
@@ -39,6 +40,7 @@ PRESTART_SECONDS = 60.0        # starting gun fires this long after reset
 # ---------------------------------------------------------------------------
 STEP_PENALTY = -0.05            # per step, encourages finishing quickly
 PROGRESS_REWARD_PER_M = 0.01    # per metre of progress toward the leg target
+NO_GO_PENALTY = -0.05           # extra per step spent pinching inside the no-go zone
 START_BONUS = 10.0
 ROUNDING_BONUS = 20.0
 FINISH_BONUS = 100.0
@@ -83,8 +85,8 @@ class SailingEnv(gym.Env):
 
     Rewards (additive per step):
         -0.05 time penalty; +0.01 per metre of progress toward the current
-        leg's target; +10 start, +20 rounding, +100 finish; -20 for leaving
-        the race area.
+        leg's target; -0.05 while pinching inside the no-go zone (TWA < 40°);
+        +10 start, +20 rounding, +100 finish; -20 for leaving the race area.
 
     Termination:
         Boat crosses the finish line (downward) after rounding the buoy,
@@ -118,6 +120,7 @@ class SailingEnv(gym.Env):
         self._race_state:    int = STATE_PRE_START
         self._step_count:    int = 0
         self._out_of_bounds: bool = False
+        self._in_no_go:      bool = False
 
         self._renderer = None
 
@@ -138,9 +141,19 @@ class SailingEnv(gym.Env):
         self._race_state    = STATE_PRE_START
         self._step_count    = 0
         self._out_of_bounds = False
+        self._in_no_go      = False
 
-        self._wind_direction = float(self.np_random.uniform(-np.pi, np.pi))
-        self._wind_speed     = float(self.np_random.uniform(*WIND_SPEED_RANGE))
+        # options can pin the wind for controlled evaluation, e.g.
+        # env.reset(options={"wind_direction": 0.0, "wind_speed": 8.0})
+        options = options or {}
+        self._wind_direction = float(
+            options.get("wind_direction",
+                        self.np_random.uniform(-np.pi, np.pi))
+        )
+        self._wind_speed = float(
+            options.get("wind_speed",
+                        self.np_random.uniform(*WIND_SPEED_RANGE))
+        )
 
         if self.render_mode == "human":
             self._render_frame()
@@ -209,7 +222,8 @@ class SailingEnv(gym.Env):
         truncated = self._step_count >= MAX_STEPS
 
         reward = self._compute_reward(
-            finished, self._out_of_bounds, started, rounded, progress
+            finished, self._out_of_bounds, started, rounded, progress,
+            self._in_no_go,
         )
 
         if self.render_mode == "human":
@@ -262,6 +276,7 @@ class SailingEnv(gym.Env):
             "gun_fired":      self._gun_fired(),
             "seconds_to_gun": self._seconds_to_gun(),
             "out_of_bounds":  self._out_of_bounds,
+            "in_no_go":       self._in_no_go,
         }
 
     # -----------------------------------------------------------------------
@@ -283,6 +298,7 @@ class SailingEnv(gym.Env):
         """
         twa_rad = _wrap_angle(self._boat_heading - self._wind_direction)
         twa_deg = math.degrees(abs(twa_rad))
+        self._in_no_go = twa_deg < NO_GO_TWA_DEG
         self._boat_speed = self._wind_speed * _polar_speed(twa_deg)
 
     # -----------------------------------------------------------------------
@@ -340,6 +356,7 @@ class SailingEnv(gym.Env):
         started: bool,
         rounded: bool,
         progress: float,
+        in_no_go: bool,
     ) -> float:
         """Compute the step reward.
 
@@ -348,6 +365,9 @@ class SailingEnv(gym.Env):
             progress shaping    metres of progress toward the current leg's
                                 target — dense signal pulling the boat down
                                 the course between the sparse phase bonuses
+            no-go penalty       pinching inside the no-go zone stalls the
+                                boat; the explicit penalty teaches bearing
+                                away and tacking instead of sitting in irons
             phase bonuses       start / rounding / finish
             out-of-bounds       leaving the race area ends the episode
 
@@ -355,6 +375,8 @@ class SailingEnv(gym.Env):
         late the boat starts after the gun.
         """
         reward = STEP_PENALTY + PROGRESS_REWARD_PER_M * progress
+        if in_no_go:
+            reward += NO_GO_PENALTY
         if started:
             reward += START_BONUS
         if rounded:

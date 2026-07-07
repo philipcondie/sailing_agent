@@ -118,6 +118,34 @@ def test_progress_shaping_rewards_closing_on_target():
     assert reward_toward > 0 > reward_away
 
 
+def test_no_go_zone_penalized():
+    env = _rigged_env()
+    env._race_state = 1                        # TO_MARK: buoy dead upwind
+    env._wind_direction = 0.0                  # wind from dead ahead (North)
+    env._boat_pos = np.array([500.0, 400.0], dtype=np.float32)
+    _, reward_pinching, _, _, info = env.step(2)
+    assert info["in_no_go"]
+    assert env._boat_speed < 3.0               # stalled
+
+    env2 = _rigged_env()                       # beam reach, same spot
+    env2._race_state = 1
+    env2._boat_pos = np.array([500.0, 400.0], dtype=np.float32)
+    _, reward_sailing, _, _, info2 = env2.step(2)
+    assert not info2["in_no_go"]
+    assert reward_pinching < reward_sailing
+
+
+def test_reset_options_pin_the_wind():
+    env = SailingEnv()
+    obs, _ = env.reset(seed=3, options={"wind_direction": 0.5, "wind_speed": 9.0})
+    assert obs[2] == np.float32(0.5)
+    assert obs[3] == np.float32(9.0)
+
+    # without options the wind still randomizes
+    obs, _ = env.reset(seed=3)
+    assert not (obs[2] == np.float32(0.5) and obs[3] == np.float32(9.0))
+
+
 def test_crossing_outside_committee_buoys_does_not_start():
     env = _rigged_env(seed=1)
     env._step_count = int(PRESTART_SECONDS) + 1        # gun already fired

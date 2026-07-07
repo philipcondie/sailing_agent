@@ -27,8 +27,9 @@ one episode may be a downwind mark on the next.
   bearing and distance to the current target, race state, seconds to the gun.
 - Actions (3): turn left, turn right, hold course.
 - Rewards: +10 start, +20 rounding, +100 finish, −0.05 per step, +0.01 per
-  metre of progress toward the current leg's target (dense shaping), and −20
-  with termination for sailing out of the race area.
+  metre of progress toward the current leg's target (dense shaping), −0.05
+  extra while pinching inside the no-go zone, and −20 with termination for
+  sailing out of the race area.
 
 See the `SailingEnv` docstring in `sailing_env/env.py` for details.
 
