@@ -15,7 +15,24 @@ START_LINE_CENTER = np.array([500.0, 100.0], dtype=np.float32)
 START_LINE_HALF_WIDTH = 60.0   # line runs from x=440 to x=560
 
 BUOY_POS = np.array([500.0, 900.0], dtype=np.float32)
-BUOY_RADIUS = 25.0             # within this distance counts as rounded
+BUOY_RADIUS = 25.0             # drawn rounding-zone ring (see ROUNDING_* for the trigger)
+
+# --- Genuine mark rounding -------------------------------------------------
+# A rounding is not "touch a radius": the boat must swing an arc *around* the
+# buoy, leaving it on the required side. We accumulate the signed change in the
+# compass bearing from the buoy to the boat (0=N, clockwise +, matching the
+# boat heading convention) while the boat is inside a capture zone. A genuine
+# rounding sweeps a wide arc in one direction; a straight clip barely moves the
+# bearing, and the per-step contribution is capped so one fast step through the
+# zone can't fake it. The sweep resets whenever the boat leaves the zone, so it
+# must be earned in a single pass.
+ROUNDING_CAPTURE_RADIUS = 100.0        # accumulate the sweep only within this of the buoy
+ROUNDING_ARC = math.pi / 2             # 90 deg of travel around the mark counts as rounded
+ROUNDING_MAX_STEP_SWEEP = math.radians(20.0)  # per-step cap on the sweep (kills straight clips)
+# Which side the mark must be left on. Compass bearing increases clockwise, so a
+# clockwise sweep (+) leaves the mark to starboard and a counter-clockwise sweep
+# (-) leaves it to port. -1 = leave the windward mark to port (the usual course).
+ROUNDING_SENSE = -1
 
 # Pre-start box: the boat spawns below the line and manoeuvres until the gun.
 SPAWN_POS = np.array([500.0, 40.0], dtype=np.float32)
@@ -119,6 +136,10 @@ class SailingEnv(gym.Env):
         self._step_count:    int = 0
         self._out_of_bounds: bool = False
 
+        # Mark-rounding sweep accumulator (see _update_mark_rounding)
+        self._mark_sweep:         float = 0.0
+        self._prev_mark_bearing:  float | None = None
+
         self._renderer = None
 
     # -----------------------------------------------------------------------
@@ -138,6 +159,8 @@ class SailingEnv(gym.Env):
         self._race_state    = STATE_PRE_START
         self._step_count    = 0
         self._out_of_bounds = False
+        self._mark_sweep        = 0.0
+        self._prev_mark_bearing = None
 
         self._wind_direction = float(self.np_random.uniform(-np.pi, np.pi))
         self._wind_speed     = float(self.np_random.uniform(*WIND_SPEED_RANGE))
@@ -193,7 +216,7 @@ class SailingEnv(gym.Env):
                 self._race_state = STATE_TO_MARK
                 started = True
         elif self._race_state == STATE_TO_MARK:
-            if self._near_buoy():
+            if self._update_mark_rounding():
                 self._race_state = STATE_TO_FINISH
                 rounded = True
         elif self._race_state == STATE_TO_FINISH:
@@ -295,8 +318,34 @@ class SailingEnv(gym.Env):
     def _seconds_to_gun(self) -> float:
         return max(0.0, PRESTART_SECONDS - self._step_count * DT)
 
-    def _near_buoy(self) -> bool:
-        return bool(np.linalg.norm(self._boat_pos - BUOY_POS) <= BUOY_RADIUS)
+    def _update_mark_rounding(self) -> bool:
+        """Accumulate the boat's swept angle around the mark and report a
+        genuine rounding.
+
+        The boat must travel an arc *around* the buoy on the required side,
+        not merely touch a radius. We track the signed change in the compass
+        bearing from the buoy to the boat (0=N, clockwise +) while the boat is
+        within ROUNDING_CAPTURE_RADIUS; each step's contribution is clamped to
+        ROUNDING_MAX_STEP_SWEEP so a single fast pass through the zone can't
+        register a fake arc. A rounding is recognised once the sweep reaches
+        ROUNDING_ARC in the ROUNDING_SENSE direction. Leaving the capture zone
+        resets the accumulator, so the arc must be completed in one pass.
+        """
+        vec  = self._boat_pos - BUOY_POS
+        dist = float(np.hypot(vec[0], vec[1]))
+        if dist > ROUNDING_CAPTURE_RADIUS:
+            self._mark_sweep = 0.0
+            self._prev_mark_bearing = None
+            return False
+
+        bearing = float(np.arctan2(vec[0], vec[1]))   # compass: 0=N, CW+
+        if self._prev_mark_bearing is not None:
+            step = _wrap_angle(bearing - self._prev_mark_bearing)
+            step = max(-ROUNDING_MAX_STEP_SWEEP, min(ROUNDING_MAX_STEP_SWEEP, step))
+            self._mark_sweep += step
+        self._prev_mark_bearing = bearing
+
+        return ROUNDING_SENSE * self._mark_sweep >= ROUNDING_ARC
 
     def _crossed_line(self, upward: bool) -> bool:
         """Detect a directed crossing of the start/finish line segment.
