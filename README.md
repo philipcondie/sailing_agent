@@ -23,12 +23,15 @@ it (the "no-go zone"), a beam reach is fastest, dead downwind is slow. Wind
 direction and strength are randomized every episode, so an upwind mark on
 one episode may be a downwind mark on the next.
 
-- Observation (8 floats): heading, boat speed, wind direction, wind speed,
-  bearing and distance to the current target, race state, seconds to the gun.
+- Observation (9 floats): heading, boat speed, wind direction, wind speed,
+  bearing and distance to the current target, race state, seconds to the gun,
+  and the required rounding side for this episode (−1 port, +1 starboard).
 - Actions (3): turn left, turn right, hold course.
 - Rewards: +10 start, +20 rounding, +100 finish, −0.05 per step, +0.01 per
   metre of progress toward the current leg's target (dense shaping), and −20
-  with termination for sailing out of the race area.
+  with termination for sailing out of the race area. The mark must be rounded
+  genuinely — swept ≥90° around the buoy on the episode's required side, not
+  merely touched.
 
 See the `SailingEnv` docstring in `sailing_env/env.py` for details.
 

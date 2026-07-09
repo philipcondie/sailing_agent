@@ -22,6 +22,8 @@ from sailing_env.env import (
     BUOY_POS,
     BUOY_RADIUS,
     ROUNDING_CAPTURE_RADIUS,
+    SENSE_PORT,
+    SENSE_STARBOARD,
 )
 
 
@@ -38,13 +40,17 @@ def test_reset_is_pre_start():
     assert not info["gun_fired"]
 
 
-def _rigged_env(seed=42):
-    """Env with the boat heading North on a beam reach (10 m/s per step)."""
+def _rigged_env(seed=42, required_sense=SENSE_PORT):
+    """Env with the boat heading North on a beam reach (10 m/s per step).
+
+    The required rounding side is pinned (default port) so rounding tests are
+    deterministic regardless of the reset RNG."""
     env = SailingEnv()
     env.reset(seed=seed)
     env._wind_direction = np.pi / 2   # wind from the East -> TWA 90 heading N
     env._wind_speed = 10.0
     env._boat_heading = 0.0
+    env._required_sense = required_sense
     return env
 
 
@@ -148,17 +154,61 @@ def test_touching_the_mark_is_not_a_rounding():
     assert info["race_state"] == STATE_TO_MARK   # a straight punch-through never rounds
 
 
+def _walk_arc(env, bearings_deg):
+    """Teleport the boat around the buoy along the given compass bearings with
+    physics frozen; return the final info dict."""
+    info = None
+    for pos in _arc_positions(bearings_deg):
+        env._boat_pos = pos.astype(np.float32)
+        _, _, _, _, info = env.step(2)
+    return info
+
+
 def test_rounding_the_wrong_side_is_rejected():
     """Sweeping the mark clockwise (leave-to-starboard) must not count when the
     course requires a port rounding."""
-    env = _rigged_env()
+    env = _rigged_env(required_sense=SENSE_PORT)
     env._wind_speed = 0.0
     env._race_state = STATE_TO_MARK
-    # Clockwise sweep = increasing compass bearing = wrong side.
-    for pos in _arc_positions(range(-80, 60, 15)):
-        env._boat_pos = pos.astype(np.float32)
-        _, _, _, _, info = env.step(2)
+    # Clockwise sweep = increasing compass bearing = wrong side for port.
+    info = _walk_arc(env, range(-80, 60, 15))
     assert info["race_state"] == STATE_TO_MARK
+
+
+def test_starboard_rounding_accepted_when_required():
+    """When the episode requires a starboard rounding, a clockwise sweep counts."""
+    env = _rigged_env(required_sense=SENSE_STARBOARD)
+    env._wind_speed = 0.0
+    env._race_state = STATE_TO_MARK
+    # Clockwise sweep = increasing compass bearing = starboard rounding.
+    info = _walk_arc(env, range(-80, 70, 15))
+    assert info["race_state"] == STATE_TO_FINISH
+
+
+def test_port_rounding_rejected_when_starboard_required():
+    """A port (counter-clockwise) sweep must not count on a starboard course."""
+    env = _rigged_env(required_sense=SENSE_STARBOARD)
+    env._wind_speed = 0.0
+    env._race_state = STATE_TO_MARK
+    info = _walk_arc(env, range(80, -50, -15))   # CCW = port = wrong side here
+    assert info["race_state"] == STATE_TO_MARK
+
+
+def test_required_sense_is_observed_and_pinnable():
+    """The required side is randomized, exposed in the observation (index 8),
+    reported in info, and pinnable via reset options."""
+    env = SailingEnv()
+    obs, info = env.reset(seed=1, options={"required_sense": SENSE_STARBOARD})
+    assert info["required_sense"] == SENSE_STARBOARD
+    assert obs[8] == float(SENSE_STARBOARD)
+
+    obs, info = env.reset(seed=1, options={"required_sense": SENSE_PORT})
+    assert info["required_sense"] == SENSE_PORT
+    assert obs[8] == float(SENSE_PORT)
+
+    # Unpinned resets produce both sides across seeds.
+    seen = {env.reset(seed=s)[1]["required_sense"] for s in range(30)}
+    assert seen == {SENSE_PORT, SENSE_STARBOARD}
 
 
 def test_out_of_bounds_terminates_with_penalty():
