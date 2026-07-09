@@ -74,6 +74,7 @@ def run_episode(env, agent, seed: int | None = None) -> dict:
             "out_of_bounds": bool(info["out_of_bounds"]),
             "steps": len(steps) - 1,
             "total_reward": total_reward,
+            "mark_contacts": int(info["mark_contacts"]),
         },
         "steps": steps,
     }

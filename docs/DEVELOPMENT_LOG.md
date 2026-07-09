@@ -67,6 +67,11 @@ and what to build next. Update it as the project evolves.
    and the accumulator resets when the boat leaves the zone, so the arc must
    be earned in one continuous pass. This changed the learning problem:
    policies trained under the touch rule (`runs/baseline`) are stale.
+   **Superseded on the `randomized-rounding-side` branch**: the sweep
+   heuristic turned out to be exploitable (a straight flyby below the mark,
+   or a dip-under hairpin, sweeps ≥90° without ever wrapping the mark — one
+   of the baseline-v3 showcase GIFs was such a false positive). The branch
+   replaces it with the exact string rule; see the branch entry below.
 
 ### Unmerged branches (all pushed to origin)
 - **`claude/gymnasium-race-states-wt737w`** — "phase 1": adds
@@ -96,8 +101,24 @@ and what to build next. Update it as the project evolves.
   **9th observation float** (−1 port, +1 starboard) — without it the agent
   couldn't know which way to round. Also logged in `info`, eval trajectory
   JSONs, `episodes.csv`, and `evals.csv`. The 9-float layout invalidates all
-  8-obs checkpoints (baseline, baseline-v2). PR link:
-  https://github.com/philipcondie/sailing_agent/pull/new/randomized-rounding-side
+  8-obs checkpoints (baseline, baseline-v2). PR #7.
+  Also on this branch (added after baseline-v3 exposed the sweep exploit):
+  - **String rule (RRS 28.2)** — `_update_mark_rounding` now detects a
+    directed crossing of the ray due north of the buoy (both legs are south
+    of the mark, so "taut string hooks the mark" ⟺ "track crosses that ray,
+    net in the required direction"; west→east = starboard, east→west =
+    port). Crossings are net-counted, so crossing back unwinds. All sweep
+    constants (`ROUNDING_CAPTURE_RADIUS/ARC/MAX_STEP_SWEEP`) are gone.
+  - **Mark contact penalty (RRS 31)** — `MARK_CONTACT_PENALTY = -5` when
+    the step's track segment comes within `MARK_CONTACT_RADIUS = 5 m` of
+    the buoy (segment, not endpoint, so a fast boat can't tunnel past),
+    once per incident (re-arms after leaving the zone). Cumulative
+    `mark_contacts` is logged in info, `episodes.csv`, `evals.csv`, and
+    eval trajectory JSONs.
+  - NOTE: `runs/baseline-v3` was trained under the exploitable sweep rule —
+    its rounding/finish numbers are inflated (its starboard payoff GIF is a
+    credited non-rounding) and it predates the contact penalty. Retrain
+    (baseline-v4) before using it as a reference.
 - **`docs-chart-guide`** — `docs/CHART_GUIDE.md`: how to read the six
   diagnostic charts (training-time vs greedy-eval views, color convention,
   healthy shapes). Docs only; merges independently. PR link:
@@ -144,8 +165,11 @@ as disposable and regenerate as needed.
   obs and round the required way. It learned **both sides**, roughly
   balanced at late checkpoints (≥1.6M): finish rate 0.31 port / 0.36
   starboard; best races R=124.0 (port, 439 s) and R=118.6 (starboard,
-  560 s). Verified the two payoff GIFs sweep opposite directions (−273°
-  vs +136°). Overall finish rates are below v2 — genuinely harder task.
+  560 s). **Caveat, discovered later:** these numbers used the exploitable
+  sweep rule — string-rule analysis showed the starboard payoff race never
+  actually wrapped the mark (net north-ray crossings = 0), so the rounding
+  and finish rates are inflated. Superseded by the string rule + mark
+  contact penalty (same branch); retrain as baseline-v4.
 
 ### Gotchas a future agent should know
 - Reward-magnitude tests assert RANGES (e.g. `9 < r < 11`), because

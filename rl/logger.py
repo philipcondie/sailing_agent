@@ -36,14 +36,14 @@ class RunLogger:
         "started", "rounded", "finished",
         "start_step", "round_step", "finish_step",
         "epsilon", "mean_loss", "mean_q", "wind_speed", "wind_direction",
-        "required_sense", "oob",
+        "required_sense", "oob", "mark_contacts",
     ]
     TRAINING_COLUMNS = [
         "global_step", "loss", "mean_q", "max_q", "epsilon", "buffer_fill",
     ]
     EVAL_COLUMNS = [
         "global_step", "episode", "steps", "total_reward",
-        "started", "rounded", "finished", "required_sense",
+        "started", "rounded", "finished", "required_sense", "mark_contacts",
     ]
 
     def __init__(self, run_dir: Path):

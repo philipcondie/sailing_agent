@@ -17,24 +17,30 @@ START_LINE_HALF_WIDTH = 60.0   # line runs from x=440 to x=560
 BUOY_POS = np.array([500.0, 900.0], dtype=np.float32)
 BUOY_RADIUS = 25.0             # drawn rounding-zone ring (see ROUNDING_* for the trigger)
 
-# --- Genuine mark rounding -------------------------------------------------
-# A rounding is not "touch a radius": the boat must swing an arc *around* the
-# buoy, leaving it on the required side. We accumulate the signed change in the
-# compass bearing from the buoy to the boat (0=N, clockwise +, matching the
-# boat heading convention) while the boat is inside a capture zone. A genuine
-# rounding sweeps a wide arc in one direction; a straight clip barely moves the
-# bearing, and the per-step contribution is capped so one fast step through the
-# zone can't fake it. The sweep resets whenever the boat leaves the zone, so it
-# must be earned in a single pass.
-ROUNDING_CAPTURE_RADIUS = 100.0        # accumulate the sweep only within this of the buoy
-ROUNDING_ARC = math.pi / 2             # 90 deg of travel around the mark counts as rounded
-ROUNDING_MAX_STEP_SWEEP = math.radians(20.0)  # per-step cap on the sweep (kills straight clips)
+# --- Genuine mark rounding: the string rule (RRS 28.2) ----------------------
+# A rounding is judged topologically, the way the Racing Rules of Sailing do:
+# a taut string representing the boat's track must hook around the mark on the
+# required side. Both legs of this course lie south of the buoy, so the string
+# hooks the mark exactly when the track crosses the ray extending due NORTH
+# from the buoy, net in the required direction: crossing west-to-east is
+# clockwise around the mark (leaves it to starboard, +1); east-to-west is
+# counter-clockwise (port, -1). Crossings are net-counted, so crossing back
+# unwinds an incomplete rounding (RRS 28.2 lets a boat correct her course any
+# time before she finishes). No radius, arc, or sweep heuristics: those can be
+# satisfied by paths that never actually round the mark.
 # Which side the mark must be left on is randomized per episode and exposed in
-# the observation (required_sense). Compass bearing increases clockwise, so a
-# clockwise sweep (+1) leaves the mark to starboard and a counter-clockwise
-# sweep (-1) leaves it to port.
+# the observation (required_sense).
 SENSE_PORT = -1
 SENSE_STARBOARD = 1
+
+# --- Touching the mark (RRS 31) ----------------------------------------------
+# Hitting the buoy is a foul. Coming within MARK_CONTACT_RADIUS of the buoy
+# (measured against the step's track segment, so a fast boat can't tunnel past
+# between samples) costs MARK_CONTACT_PENALTY once per incident: the penalty
+# re-arms only after the boat leaves the contact zone — the RL analogue of the
+# one-turn penalty a fouling boat takes under RRS 44.2.
+MARK_CONTACT_RADIUS = 5.0
+MARK_CONTACT_PENALTY = -5.0
 
 # Pre-start box: the boat spawns below the line and manoeuvres until the gun.
 SPAWN_POS = np.array([500.0, 40.0], dtype=np.float32)
@@ -104,8 +110,14 @@ class SailingEnv(gym.Env):
 
     Rewards (additive per step):
         -0.05 time penalty; +0.01 per metre of progress toward the current
-        leg's target; +10 start, +20 rounding, +100 finish; -20 for leaving
-        the race area.
+        leg's target; +10 start, +20 rounding, +100 finish; -5 per mark
+        contact (touching the buoy, once per incident); -20 for leaving the
+        race area.
+
+    Mark rounding follows the string rule (RRS 28.2): the rounding counts
+    only when the boat's track crosses the ray due north of the buoy, net in
+    the required direction — i.e. a taut string through the track would hook
+    the mark on the required side.
 
     Termination:
         Boat crosses the finish line (downward) after rounding the buoy,
@@ -143,9 +155,10 @@ class SailingEnv(gym.Env):
         # Which side to leave the mark on this episode (-1 port, +1 starboard),
         # randomized in reset() and part of the observation.
         self._required_sense:     int = SENSE_PORT
-        # Mark-rounding sweep accumulator (see _update_mark_rounding)
-        self._mark_sweep:         float = 0.0
-        self._prev_mark_bearing:  float | None = None
+        # Mark rounding (string rule) and mark contact (see _update_mark_*)
+        self._mark_crossings:  int = 0
+        self._in_mark_contact: bool = False
+        self._mark_contacts:   int = 0
 
         self._renderer = None
 
@@ -166,8 +179,9 @@ class SailingEnv(gym.Env):
         self._race_state    = STATE_PRE_START
         self._step_count    = 0
         self._out_of_bounds = False
-        self._mark_sweep        = 0.0
-        self._prev_mark_bearing = None
+        self._mark_crossings  = 0
+        self._in_mark_contact = False
+        self._mark_contacts   = 0
 
         # Required rounding side: random per episode, or pinned via
         # reset(options={"required_sense": -1 or +1}) for reproducible eval.
@@ -237,6 +251,9 @@ class SailingEnv(gym.Env):
             # Finish by re-crossing the line downward (from the course side).
             finished = self._crossed_line(upward=False)
 
+        # The buoy is a physical object in every race state (RRS 31).
+        mark_contact = self._update_mark_contact()
+
         self._out_of_bounds = bool(
             not (0.0 <= self._boat_pos[0] <= WORLD_W)
             or not (0.0 <= self._boat_pos[1] <= WORLD_H)
@@ -246,7 +263,8 @@ class SailingEnv(gym.Env):
         truncated = self._step_count >= MAX_STEPS
 
         reward = self._compute_reward(
-            finished, self._out_of_bounds, started, rounded, progress
+            finished, self._out_of_bounds, started, rounded, progress,
+            mark_contact,
         )
 
         if self.render_mode == "human":
@@ -301,6 +319,7 @@ class SailingEnv(gym.Env):
             "seconds_to_gun": self._seconds_to_gun(),
             "out_of_bounds":  self._out_of_bounds,
             "required_sense": self._required_sense,
+            "mark_contacts":  self._mark_contacts,
         }
 
     # -----------------------------------------------------------------------
@@ -335,34 +354,63 @@ class SailingEnv(gym.Env):
         return max(0.0, PRESTART_SECONDS - self._step_count * DT)
 
     def _update_mark_rounding(self) -> bool:
-        """Accumulate the boat's swept angle around the mark and report a
-        genuine rounding.
+        """Report a genuine mark rounding using the string rule (RRS 28.2).
 
-        The boat must travel an arc *around* the buoy on the required side,
-        not merely touch a radius. We track the signed change in the compass
-        bearing from the buoy to the boat (0=N, clockwise +) while the boat is
-        within ROUNDING_CAPTURE_RADIUS; each step's contribution is clamped to
-        ROUNDING_MAX_STEP_SWEEP so a single fast pass through the zone can't
-        register a fake arc. A rounding is recognised once the sweep reaches
-        ROUNDING_ARC in this episode's required direction (self._required_sense;
-        -1 = port, +1 = starboard). Leaving the capture zone resets the
-        accumulator, so the arc must be completed in one pass.
+        A taut string representing the boat's track must hook around the mark
+        on the required side. Both legs of this course lie south of the buoy,
+        so the string hooks the mark exactly when the track crosses the ray
+        extending due north from the buoy, net in the required direction:
+        west-to-east is clockwise around the mark (starboard, +1),
+        east-to-west is counter-clockwise (port, -1). Net counting means a
+        crossing the wrong way, or crossing back, unwinds toward zero — the
+        rounding completes only when the net count reaches the episode's
+        required sense.
         """
-        vec  = self._boat_pos - BUOY_POS
-        dist = float(np.hypot(vec[0], vec[1]))
-        if dist > ROUNDING_CAPTURE_RADIUS:
-            self._mark_sweep = 0.0
-            self._prev_mark_bearing = None
+        x_ray = float(BUOY_POS[0])
+        prev  = self._prev_boat_pos.astype(np.float64)
+        curr  = self._boat_pos.astype(np.float64)
+
+        if prev[0] < x_ray <= curr[0]:
+            sense = SENSE_STARBOARD
+        elif prev[0] > x_ray >= curr[0]:
+            sense = SENSE_PORT
+        else:
             return False
 
-        bearing = float(np.arctan2(vec[0], vec[1]))   # compass: 0=N, CW+
-        if self._prev_mark_bearing is not None:
-            step = _wrap_angle(bearing - self._prev_mark_bearing)
-            step = max(-ROUNDING_MAX_STEP_SWEEP, min(ROUNDING_MAX_STEP_SWEEP, step))
-            self._mark_sweep += step
-        self._prev_mark_bearing = bearing
+        # y where the track segment intersects x = x_ray; the ray starts at
+        # the buoy, so crossings south of it (e.g. a flyby between the mark
+        # and the finish line) don't count.
+        t = (x_ray - prev[0]) / (curr[0] - prev[0])
+        cross_y = prev[1] + t * (curr[1] - prev[1])
+        if cross_y <= float(BUOY_POS[1]):
+            return False
 
-        return self._required_sense * self._mark_sweep >= ROUNDING_ARC
+        self._mark_crossings += sense
+        return self._mark_crossings == self._required_sense
+
+    def _update_mark_contact(self) -> bool:
+        """Report a NEW contact with the buoy (RRS 31).
+
+        The contact zone is tested against the whole track segment of this
+        step, not just the endpoint — at full speed the boat moves further
+        per step than MARK_CONTACT_RADIUS and could otherwise tunnel past.
+        One penalty per incident: re-arms after the boat leaves the zone.
+        """
+        prev = self._prev_boat_pos.astype(np.float64)
+        curr = self._boat_pos.astype(np.float64)
+        buoy = BUOY_POS.astype(np.float64)
+
+        d = curr - prev
+        denom = float(d @ d)
+        t = 0.0 if denom == 0.0 else min(1.0, max(0.0, float((buoy - prev) @ d) / denom))
+        nearest = prev + t * d
+        in_zone = float(np.hypot(*(nearest - buoy))) <= MARK_CONTACT_RADIUS
+
+        new_contact = in_zone and not self._in_mark_contact
+        self._in_mark_contact = in_zone
+        if new_contact:
+            self._mark_contacts += 1
+        return new_contact
 
     def _crossed_line(self, upward: bool) -> bool:
         """Detect a directed crossing of the start/finish line segment.
@@ -406,6 +454,7 @@ class SailingEnv(gym.Env):
         started: bool,
         rounded: bool,
         progress: float,
+        mark_contact: bool = False,
     ) -> float:
         """Compute the step reward.
 
@@ -415,6 +464,8 @@ class SailingEnv(gym.Env):
                                 target — dense signal pulling the boat down
                                 the course between the sparse phase bonuses
             phase bonuses       start / rounding / finish
+            mark contact        touching the buoy is a foul (RRS 31), one
+                                penalty per incident
             out-of-bounds       leaving the race area ends the episode
 
         TODO possible extensions: VMG-based shaping, penalty scaled by how
@@ -427,6 +478,8 @@ class SailingEnv(gym.Env):
             reward += ROUNDING_BONUS
         if finished:
             reward += FINISH_BONUS
+        if mark_contact:
+            reward += MARK_CONTACT_PENALTY
         if out_of_bounds:
             reward += OUT_OF_BOUNDS_PENALTY
         return reward

@@ -28,10 +28,12 @@ one episode may be a downwind mark on the next.
   and the required rounding side for this episode (−1 port, +1 starboard).
 - Actions (3): turn left, turn right, hold course.
 - Rewards: +10 start, +20 rounding, +100 finish, −0.05 per step, +0.01 per
-  metre of progress toward the current leg's target (dense shaping), and −20
-  with termination for sailing out of the race area. The mark must be rounded
-  genuinely — swept ≥90° around the buoy on the episode's required side, not
-  merely touched.
+  metre of progress toward the current leg's target (dense shaping), −5 per
+  contact with the buoy (a foul, as in RRS 31 — once per incident), and −20
+  with termination for sailing out of the race area. Mark rounding follows
+  the racing string rule (RRS 28.2): the boat's track must cross the ray due
+  north of the buoy, net in the episode's required direction — i.e. a taut
+  string through the track would hook the mark on the required side.
 
 See the `SailingEnv` docstring in `sailing_env/env.py` for details.
 

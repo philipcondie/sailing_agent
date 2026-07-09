@@ -21,7 +21,7 @@ from sailing_env.env import (
     START_LINE_CENTER,
     BUOY_POS,
     BUOY_RADIUS,
-    ROUNDING_CAPTURE_RADIUS,
+    MARK_CONTACT_PENALTY,
     SENSE_PORT,
     SENSE_STARBOARD,
 )
@@ -54,29 +54,21 @@ def _rigged_env(seed=42, required_sense=SENSE_PORT):
     return env
 
 
-def _arc_positions(bearings_deg, radius=40.0):
-    """Boat positions at a given radius around the buoy, at compass bearings
-    (0=N, clockwise +). A decreasing bearing sweep is counter-clockwise on the
-    map = leaving the mark to port."""
-    out = []
-    for b in bearings_deg:
-        r = np.radians(b)
-        out.append(BUOY_POS + radius * np.array([np.sin(r), np.cos(r)], dtype=np.float32))
-    return out
-
-
-def _round_the_mark(env, bearings_deg=None):
-    """Teleport the boat step-by-step around the buoy (port rounding) with the
-    physics frozen, until the rounding registers. Returns (obs, reward, info)
-    from the step that completed the rounding."""
-    if bearings_deg is None:
-        bearings_deg = range(80, -50, -15)   # CCW sweep of ~130 deg, 15 deg/step
-    for pos in _arc_positions(bearings_deg):
-        env._boat_pos = pos.astype(np.float32)
-        obs, reward, _, _, info = env.step(2)
-        if info["race_state"] == STATE_TO_FINISH:
-            return obs, reward, info
-    raise AssertionError("boat never registered a rounding while walking the arc")
+def _sail_across_north_ray(env, sense, y_offset=40.0):
+    """Sail the boat across the ray due north of the buoy in one real step
+    (the rounding detector works on the step's track segment, so the boat
+    must actually move — teleports between steps are invisible to it).
+    sense=+1 crosses west-to-east (clockwise round the mark = starboard),
+    sense=-1 east-to-west (counter-clockwise = port).
+    Returns (obs, reward, info) from the crossing step."""
+    env._wind_direction = 0.0                        # wind from the North
+    env._wind_speed = 10.0
+    env._boat_heading = sense * np.pi / 2            # East / West: beam reach, 10 m/s
+    env._boat_pos = np.array(
+        [BUOY_POS[0] - sense * 5.0, BUOY_POS[1] + y_offset], dtype=np.float32
+    )
+    obs, reward, _, _, info = env.step(2)            # 10 m across: 5 m short -> 5 m past
+    return obs, reward, info
 
 
 def test_full_race_sequence():
@@ -104,16 +96,15 @@ def test_full_race_sequence():
     assert 9.0 < reward < 11.0        # start bonus (+ shaping/time terms)
     assert abs(obs[4]) < 0.1          # bearing target is now the buoy (North)
 
-    # Genuinely rounding the buoy switches to the finish leg. Freeze the
-    # physics (wind 0) and walk the boat around the mark on the required side
-    # (counter-clockwise on the map = leave the mark to port).
-    env._wind_speed = 0.0
-    obs, reward, info = _round_the_mark(env)
+    # Genuinely rounding the buoy switches to the finish leg: sail across
+    # the ray north of the mark, east-to-west (leave the mark to port).
+    obs, reward, info = _sail_across_north_ray(env, SENSE_PORT)
     assert info["race_state"] == STATE_TO_FINISH
     assert 19.0 < reward < 21.0       # rounding bonus (+ shaping/time terms)
     assert abs(abs(obs[4]) - np.pi) < 0.2   # target is the finish line (South)
 
-    # Restore movement for the finish-line crossings below.
+    # Restore a beam reach heading North for the finish-line crossings below.
+    env._wind_direction = np.pi / 2
     env._wind_speed = 10.0
     env._boat_heading = 0.0
 
@@ -132,66 +123,150 @@ def test_full_race_sequence():
 
 
 def test_touching_the_mark_is_not_a_rounding():
-    """Merely entering (or sitting inside) the buoy radius must not count as a
-    rounding — the boat has to travel an arc around the mark."""
+    """Merely being near (or sitting next to) the buoy must not count as a
+    rounding — the taut string through the track has to hook the mark."""
     env = _rigged_env()
     env._wind_speed = 0.0                       # freeze physics
     env._race_state = STATE_TO_MARK
 
-    # Sit right on the mark for several steps: no angular sweep, no rounding.
+    # Sit right next to the mark for several steps: the string never wraps.
     env._boat_pos = (BUOY_POS + np.array([0.0, -0.5 * BUOY_RADIUS], dtype=np.float32)).astype(np.float32)
     for _ in range(10):
         _, _, _, _, info = env.step(2)
         assert info["race_state"] == STATE_TO_MARK
 
-    # Drive straight through the mark zone (S -> N): a fast clip, not an arc.
+    # Drive straight past the mark (S -> N): the track never crosses the
+    # north ray, so the string pulls free — no rounding.
     env2 = _rigged_env()                         # wind 10 m/s, heading North
     env2._race_state = STATE_TO_MARK
-    env2._boat_pos = (BUOY_POS + np.array([1.0, -ROUNDING_CAPTURE_RADIUS], dtype=np.float32)).astype(np.float32)
-    # Enough steps to pass fully through the zone and out the far side.
-    for _ in range(int(2 * ROUNDING_CAPTURE_RADIUS / 10) + 2):
+    env2._boat_pos = (BUOY_POS + np.array([1.0, -100.0], dtype=np.float32)).astype(np.float32)
+    for _ in range(22):                          # well past the far side
         _, _, _, _, info = env2.step(2)
     assert info["race_state"] == STATE_TO_MARK   # a straight punch-through never rounds
 
 
-def _walk_arc(env, bearings_deg):
-    """Teleport the boat around the buoy along the given compass bearings with
-    physics frozen; return the final info dict."""
-    info = None
-    for pos in _arc_positions(bearings_deg):
-        env._boat_pos = pos.astype(np.float32)
-        _, _, _, _, info = env.step(2)
-    return info
-
-
 def test_rounding_the_wrong_side_is_rejected():
-    """Sweeping the mark clockwise (leave-to-starboard) must not count when the
-    course requires a port rounding."""
+    """Passing over the top clockwise (leave-to-starboard) must not count when
+    the course requires a port rounding."""
     env = _rigged_env(required_sense=SENSE_PORT)
-    env._wind_speed = 0.0
     env._race_state = STATE_TO_MARK
-    # Clockwise sweep = increasing compass bearing = wrong side for port.
-    info = _walk_arc(env, range(-80, 60, 15))
+    _, _, info = _sail_across_north_ray(env, SENSE_STARBOARD)
     assert info["race_state"] == STATE_TO_MARK
 
 
 def test_starboard_rounding_accepted_when_required():
-    """When the episode requires a starboard rounding, a clockwise sweep counts."""
+    """When the episode requires a starboard rounding, a clockwise (west-to-
+    east) crossing over the top counts."""
     env = _rigged_env(required_sense=SENSE_STARBOARD)
-    env._wind_speed = 0.0
     env._race_state = STATE_TO_MARK
-    # Clockwise sweep = increasing compass bearing = starboard rounding.
-    info = _walk_arc(env, range(-80, 70, 15))
+    _, _, info = _sail_across_north_ray(env, SENSE_STARBOARD)
     assert info["race_state"] == STATE_TO_FINISH
 
 
 def test_port_rounding_rejected_when_starboard_required():
-    """A port (counter-clockwise) sweep must not count on a starboard course."""
+    """A port (counter-clockwise) rounding must not count on a starboard course."""
     env = _rigged_env(required_sense=SENSE_STARBOARD)
+    env._race_state = STATE_TO_MARK
+    _, _, info = _sail_across_north_ray(env, SENSE_PORT)
+    assert info["race_state"] == STATE_TO_MARK
+
+
+def test_flyby_below_the_mark_is_not_a_rounding():
+    """String rule (RRS 28.2): a track that stays between the mark and the
+    finish line never hooks the mark, no matter how much bearing it sweeps.
+    This straight pass accumulates ~93 deg of sweep and fooled the old
+    sweep-based check."""
+    env = _rigged_env(required_sense=SENSE_PORT)
+    env._race_state = STATE_TO_MARK
+    env._wind_direction = 0.0                        # wind from the North
+    env._wind_speed = 10.0
+    env._boat_heading = np.pi / 2                    # due East: beam reach, 10 m/s
+    env._boat_pos = np.array(
+        [BUOY_POS[0] - 120.0, BUOY_POS[1] - 60.0], dtype=np.float32
+    )
+    info = None
+    for _ in range(24):                              # straight W->E pass, 60 m below
+        _, _, _, _, info = env.step(2)
+    assert info["race_state"] == STATE_TO_MARK
+
+
+def test_dip_under_hairpin_is_not_a_rounding():
+    """West of the mark -> under it -> up the east side is ~180 deg of CCW
+    bearing sweep, but the track only crosses x = buoy_x SOUTH of the buoy,
+    so the string still pulls free. This path beat any sweep threshold
+    below 270 deg."""
+    env = _rigged_env(required_sense=SENSE_PORT)
+    env._race_state = STATE_TO_MARK
+    env._wind_direction = 0.0
+    env._wind_speed = 10.0
+    env._boat_heading = np.pi / 2                    # East: dip under the mark
+    env._boat_pos = np.array(
+        [BUOY_POS[0] - 45.0, BUOY_POS[1] - 40.0], dtype=np.float32
+    )
+    info = None
+    for _ in range(9):                               # crosses x = buoy_x at y < buoy_y
+        _, _, _, _, info = env.step(2)
+    env._wind_direction = np.pi / 2                  # wind from the East
+    env._boat_heading = 0.0                          # climb the east side to NE of the mark
+    for _ in range(8):
+        _, _, _, _, info = env.step(2)
+    assert info["race_state"] == STATE_TO_MARK
+
+
+def test_crossings_are_net_counted():
+    """RRS 28.2 judges the whole track: a wrong-way crossing over the top
+    must be unwound before a correct-way crossing can complete the rounding."""
+    env = _rigged_env(required_sense=SENSE_PORT)
+    env._race_state = STATE_TO_MARK
+
+    _, _, info = _sail_across_north_ray(env, SENSE_STARBOARD)   # wrong way: net +1
+    assert info["race_state"] == STATE_TO_MARK
+    _, _, info = _sail_across_north_ray(env, SENSE_PORT)        # unwinds to net 0 — correct
+    assert info["race_state"] == STATE_TO_MARK                  # direction, yet NOT a rounding
+    _, reward, info = _sail_across_north_ray(env, SENSE_PORT)   # net -1 = port: rounded
+    assert info["race_state"] == STATE_TO_FINISH
+    assert 19.0 < reward < 21.0
+
+
+def test_touching_the_mark_is_penalized_once_per_incident():
+    """RRS 31: contact with the buoy costs MARK_CONTACT_PENALTY, once per
+    incident — no re-penalty while still in contact, re-armed after leaving."""
+    env = _rigged_env()
     env._wind_speed = 0.0
     env._race_state = STATE_TO_MARK
-    info = _walk_arc(env, range(80, -50, -15))   # CCW = port = wrong side here
-    assert info["race_state"] == STATE_TO_MARK
+
+    env._boat_pos = (BUOY_POS + np.array([0.0, -30.0], dtype=np.float32)).astype(np.float32)
+    _, _, _, _, info = env.step(2)
+    assert info["mark_contacts"] == 0
+
+    env._boat_pos = (BUOY_POS + np.array([0.0, -3.0], dtype=np.float32)).astype(np.float32)
+    _, reward, _, _, info = env.step(2)              # first touch
+    assert info["mark_contacts"] == 1
+    assert MARK_CONTACT_PENALTY - 1.0 < reward < MARK_CONTACT_PENALTY + 1.0
+
+    _, reward, _, _, info = env.step(2)              # still touching: no new penalty
+    assert info["mark_contacts"] == 1
+    assert reward > -1.0
+
+    env._boat_pos = (BUOY_POS + np.array([0.0, -30.0], dtype=np.float32)).astype(np.float32)
+    _, _, _, _, info = env.step(2)                   # clear the mark
+    env._boat_pos = (BUOY_POS + np.array([0.0, -3.0], dtype=np.float32)).astype(np.float32)
+    _, _, _, _, info = env.step(2)                   # second incident
+    assert info["mark_contacts"] == 2
+
+
+def test_fast_pass_over_the_mark_still_registers_contact():
+    """Contact is tested against the step's track segment, not the endpoint —
+    a boat covering more than the contact radius per step can't tunnel past."""
+    env = _rigged_env()
+    env._race_state = STATE_TO_MARK
+    env._wind_direction = 0.0
+    env._wind_speed = 12.0                           # beam reach: 12 m in one step
+    env._boat_heading = np.pi / 2                    # due East, straight at the mark
+    env._boat_pos = np.array([BUOY_POS[0] - 6.0, BUOY_POS[1]], dtype=np.float32)
+    _, _, _, _, info = env.step(2)                   # endpoints 6 m clear on either side;
+    assert info["mark_contacts"] == 1                # the segment passes through the buoy
+    assert info["race_state"] == STATE_TO_MARK       # and that is still not a rounding
 
 
 def test_required_sense_is_observed_and_pinnable():
