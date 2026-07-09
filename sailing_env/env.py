@@ -29,10 +29,12 @@ BUOY_RADIUS = 25.0             # drawn rounding-zone ring (see ROUNDING_* for th
 ROUNDING_CAPTURE_RADIUS = 100.0        # accumulate the sweep only within this of the buoy
 ROUNDING_ARC = math.pi / 2             # 90 deg of travel around the mark counts as rounded
 ROUNDING_MAX_STEP_SWEEP = math.radians(20.0)  # per-step cap on the sweep (kills straight clips)
-# Which side the mark must be left on. Compass bearing increases clockwise, so a
-# clockwise sweep (+) leaves the mark to starboard and a counter-clockwise sweep
-# (-) leaves it to port. -1 = leave the windward mark to port (the usual course).
-ROUNDING_SENSE = -1
+# Which side the mark must be left on is randomized per episode and exposed in
+# the observation (required_sense). Compass bearing increases clockwise, so a
+# clockwise sweep (+1) leaves the mark to starboard and a counter-clockwise
+# sweep (-1) leaves it to port.
+SENSE_PORT = -1
+SENSE_STARBOARD = 1
 
 # Pre-start box: the boat spawns below the line and manoeuvres until the gun.
 SPAWN_POS = np.array([500.0, 40.0], dtype=np.float32)
@@ -80,7 +82,7 @@ class SailingEnv(gym.Env):
         2 TO_FINISH  — head back down and cross the finish line (same line
                        as the start, crossed in the opposite direction).
 
-    Observation (8 floats):
+    Observation (9 floats):
         boat_heading        [-pi, pi]   rad  (0 = North, clockwise positive)
         boat_speed          [0, 8]      m/s
         wind_direction      [-pi, pi]   rad  (direction wind is coming FROM)
@@ -89,6 +91,8 @@ class SailingEnv(gym.Env):
         distance_to_target  [0, max]    m
         race_state          {0, 1, 2}   see above
         seconds_to_gun      [0, 60]     countdown to the starting gun (0 after)
+        required_sense      {-1, +1}    which side to leave the mark on this
+                                        episode: -1 = port, +1 = starboard
 
     The bearing/distance target is the start line centre in PRE_START and
     TO_FINISH, and the buoy in TO_MARK.
@@ -121,8 +125,8 @@ class SailingEnv(gym.Env):
         # --- Action / observation spaces -----------------------------------
         self.action_space = spaces.Discrete(3)
 
-        obs_low  = np.array([-np.pi, 0.0,          -np.pi, 0.0,          -np.pi, 0.0,    0.0, 0.0], dtype=np.float32)
-        obs_high = np.array([ np.pi, MAX_BOAT_SPEED, np.pi, MAX_WIND_SPEED, np.pi, MAX_DIST, 2.0, PRESTART_SECONDS], dtype=np.float32)
+        obs_low  = np.array([-np.pi, 0.0,          -np.pi, 0.0,          -np.pi, 0.0,    0.0, 0.0,             -1.0], dtype=np.float32)
+        obs_high = np.array([ np.pi, MAX_BOAT_SPEED, np.pi, MAX_WIND_SPEED, np.pi, MAX_DIST, 2.0, PRESTART_SECONDS, 1.0], dtype=np.float32)
         self.observation_space = spaces.Box(obs_low, obs_high, dtype=np.float32)
 
         # --- Internal state (set properly in reset) ------------------------
@@ -136,6 +140,9 @@ class SailingEnv(gym.Env):
         self._step_count:    int = 0
         self._out_of_bounds: bool = False
 
+        # Which side to leave the mark on this episode (-1 port, +1 starboard),
+        # randomized in reset() and part of the observation.
+        self._required_sense:     int = SENSE_PORT
         # Mark-rounding sweep accumulator (see _update_mark_rounding)
         self._mark_sweep:         float = 0.0
         self._prev_mark_bearing:  float | None = None
@@ -161,6 +168,13 @@ class SailingEnv(gym.Env):
         self._out_of_bounds = False
         self._mark_sweep        = 0.0
         self._prev_mark_bearing = None
+
+        # Required rounding side: random per episode, or pinned via
+        # reset(options={"required_sense": -1 or +1}) for reproducible eval.
+        if options is not None and "required_sense" in options:
+            self._required_sense = SENSE_PORT if options["required_sense"] < 0 else SENSE_STARBOARD
+        else:
+            self._required_sense = int(self.np_random.choice([SENSE_PORT, SENSE_STARBOARD]))
 
         self._wind_direction = float(self.np_random.uniform(-np.pi, np.pi))
         self._wind_speed     = float(self.np_random.uniform(*WIND_SPEED_RANGE))
@@ -273,6 +287,7 @@ class SailingEnv(gym.Env):
                 distance,
                 float(self._race_state),
                 self._seconds_to_gun(),
+                float(self._required_sense),
             ],
             dtype=np.float32,
         )
@@ -285,6 +300,7 @@ class SailingEnv(gym.Env):
             "gun_fired":      self._gun_fired(),
             "seconds_to_gun": self._seconds_to_gun(),
             "out_of_bounds":  self._out_of_bounds,
+            "required_sense": self._required_sense,
         }
 
     # -----------------------------------------------------------------------
@@ -328,8 +344,9 @@ class SailingEnv(gym.Env):
         within ROUNDING_CAPTURE_RADIUS; each step's contribution is clamped to
         ROUNDING_MAX_STEP_SWEEP so a single fast pass through the zone can't
         register a fake arc. A rounding is recognised once the sweep reaches
-        ROUNDING_ARC in the ROUNDING_SENSE direction. Leaving the capture zone
-        resets the accumulator, so the arc must be completed in one pass.
+        ROUNDING_ARC in this episode's required direction (self._required_sense;
+        -1 = port, +1 = starboard). Leaving the capture zone resets the
+        accumulator, so the arc must be completed in one pass.
         """
         vec  = self._boat_pos - BUOY_POS
         dist = float(np.hypot(vec[0], vec[1]))
@@ -345,7 +362,7 @@ class SailingEnv(gym.Env):
             self._mark_sweep += step
         self._prev_mark_bearing = bearing
 
-        return ROUNDING_SENSE * self._mark_sweep >= ROUNDING_ARC
+        return self._required_sense * self._mark_sweep >= ROUNDING_ARC
 
     def _crossed_line(self, upward: bool) -> bool:
         """Detect a directed crossing of the start/finish line segment.

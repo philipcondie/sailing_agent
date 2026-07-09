@@ -66,6 +66,7 @@ def run_episode(env, agent, seed: int | None = None) -> dict:
     return {
         "wind_direction": float(raw._wind_direction),
         "wind_speed": float(raw._wind_speed),
+        "required_sense": int(raw._required_sense),
         "outcome": {
             "started": started,
             "rounded": rounded,

@@ -112,6 +112,7 @@ def train(config: DQNConfig, run_dir: Path) -> None:
                 "mean_q": round(float(np.mean(ep_qs)), 4) if ep_qs else math.nan,
                 "wind_speed": round(float(env.unwrapped._wind_speed), 3),
                 "wind_direction": round(float(env.unwrapped._wind_direction), 4),
+                "required_sense": int(env.unwrapped._required_sense),
                 "oob": int(info["out_of_bounds"]),
             }
             logger.episodes.append(row)
@@ -153,6 +154,7 @@ def train(config: DQNConfig, run_dir: Path) -> None:
                     "started": int(o["started"]),
                     "rounded": int(o["rounded"]),
                     "finished": int(o["finished"]),
+                    "required_sense": int(traj["required_sense"]),
                 })
                 logger.save_trajectory(global_step, i, traj)
             mean_r = np.mean([t["outcome"]["total_reward"] for t in trajs])
