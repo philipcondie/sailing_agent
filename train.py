@@ -154,6 +154,7 @@ def train(config: DQNConfig, run_dir: Path) -> None:
                     "started": int(o["started"]),
                     "rounded": int(o["rounded"]),
                     "finished": int(o["finished"]),
+                    "required_sense": int(traj["required_sense"]),
                 })
                 logger.save_trajectory(global_step, i, traj)
             mean_r = np.mean([t["outcome"]["total_reward"] for t in trajs])
