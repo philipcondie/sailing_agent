@@ -6,15 +6,16 @@ heavy instrumentation so every experiment produces plots and GIFs. This file
 is the handoff document: it records what exists, why it's shaped that way,
 and what to build next. Update it as the project evolves.
 
-## 1. Project state (as of 2026-07-06)
+## 1. Project state (as of 2026-07-09)
 
-### Merged to main (PRs #1–#4)
+### Merged to main (PRs #1–#4, #6)
 1. **Three-phase race environment** (`sailing_env/env.py`). States:
    `PRE_START(0)` — boat spawns below the line, gun fires at
    `PRESTART_SECONDS = 60` sim-seconds; the race starts only on an upward
    crossing of the start line (between the committee buoys) after the gun;
    early crossings are silently ignored. `TO_MARK(1)` — round the windward
-   buoy (25 m proximity). `TO_FINISH(2)` — re-cross the line downward.
+   buoy (a *genuine* rounding — see item 6). `TO_FINISH(2)` — re-cross the
+   line downward.
    Line crossings are direction-enforced and use the interpolated
    track/line intersection. Observation: 8 floats
    `[heading, boat_speed, wind_dir, wind_speed, bearing_to_target,
@@ -56,6 +57,16 @@ and what to build next. Update it as the project evolves.
    backend, repo-root sys.path bootstrap, import course geometry from
    `sailing_env.env` with literal fallbacks, degrade gracefully on missing
    files. `runs/` and `*.pt` are gitignored.
+6. **Genuine mark rounding** (PR #6). Touching the 25 m radius no longer
+   counts — that let a tangential clip or straight drive-through score the
+   bonus. `_update_mark_rounding()` accumulates the signed change in the
+   buoy→boat compass bearing while the boat is inside a capture zone
+   (`ROUNDING_CAPTURE_RADIUS = 100 m`); a rounding registers once the sweep
+   passes `ROUNDING_ARC = 90°` in the required direction. Guards: per-step
+   sweep capped at `ROUNDING_MAX_STEP_SWEEP = 20°` (kills straight clips),
+   and the accumulator resets when the boat leaves the zone, so the arc must
+   be earned in one continuous pass. This changed the learning problem:
+   policies trained under the touch rule (`runs/baseline`) are stale.
 
 ### Unmerged branches (all pushed to origin)
 - **`claude/gymnasium-race-states-wt737w`** — "phase 1": adds
@@ -79,11 +90,27 @@ and what to build next. Update it as the project evolves.
   and `analysis/compare_runs.py` (overlay reward / finish-fraction /
   started+rounded curves for several run dirs on a shared global_step
   axis). Based on main; merges independently.
+- **`randomized-rounding-side`** — the required rounding side is randomized
+  per episode (port/starboard 50/50) at `reset()`, pinnable via
+  `reset(options={"required_sense": ±1})`, and exposed to the agent as a
+  **9th observation float** (−1 port, +1 starboard) — without it the agent
+  couldn't know which way to round. Also logged in `info`, eval trajectory
+  JSONs, `episodes.csv`, and `evals.csv`. The 9-float layout invalidates all
+  8-obs checkpoints (baseline, baseline-v2). PR link:
+  https://github.com/philipcondie/sailing_agent/pull/new/randomized-rounding-side
+- **`docs-chart-guide`** — `docs/CHART_GUIDE.md`: how to read the six
+  diagnostic charts (training-time vs greedy-eval views, color convention,
+  healthy shapes). Docs only; merges independently. PR link:
+  https://github.com/philipcondie/sailing_agent/pull/new/docs-chart-guide
+
+Note the four `claude/*` branches predate the genuine-rounding change
+(PR #6) and the randomized side, both of which touched `env.py` and the
+race-state tests — expect conflicts to reconcile at merge time.
 
 ### Experimental results so far
-All CPU, ~1400–2400 env-steps/s (a 500k-step run ≈ 3.5 min; 2M ≈ 23 min).
-Run dirs live only in the session container (gitignored) — treat them as
-disposable and regenerate as needed.
+All CPU; ~1400–5000 env-steps/s depending on machine (recent runs: 2M steps
+≈ 7 min). Run dirs live only on the local machine (gitignored) — treat them
+as disposable and regenerate as needed.
 - **Sparse rewards only** (pre-shaping `runs/demo`, 300k steps): every
   episode a 3000-step timeout; never rounded the buoy. Root cause visible
   in trajectory plots: boat drifts off-world, no gradient toward course.
@@ -100,6 +127,25 @@ disposable and regenerate as needed.
   episodes end out-of-bounds. Also observed: greedy evals are noisy/worse
   than ε=0.05 behavior at some checkpoints (classic DQN loop-lock;
   worth a look — see future work).
+- **Base case, touch-the-radius rule** (`runs/baseline`, 2M steps,
+  2026-07-08): greedy eval mean −36 → +81; first greedy finish ~825k,
+  reliable after ~1.15M; final checkpoint 3/3 started/rounded/finished
+  (best 732 s, R=+109.5). ~91% of ε-greedy training episodes ended out of
+  bounds. **Stale**: trained pre-PR-#6, so its "rounded" numbers used the
+  loose touch rule.
+- **Base case, genuine-rounding rule** (`runs/baseline-v2`, 2M steps,
+  2026-07-09): the stricter rule did *not* make the task harder — first
+  training finish ~620k (vs 738k), OOB down to ~0.75, final checkpoint 3/3
+  started / 2/3 finished, best race **315 s, R=+130.5**. This is the
+  reference run for the fixed-side (port) rule; its rounded/finish numbers
+  are the first trustworthy ones.
+- **Randomized rounding side** (`runs/baseline-v3`, 2M steps, 2026-07-09,
+  on the `randomized-rounding-side` branch): the policy must read the 9th
+  obs and round the required way. It learned **both sides**, roughly
+  balanced at late checkpoints (≥1.6M): finish rate 0.31 port / 0.36
+  starboard; best races R=124.0 (port, 439 s) and R=118.6 (starboard,
+  560 s). Verified the two payoff GIFs sweep opposite directions (−273°
+  vs +136°). Overall finish rates are below v2 — genuinely harder task.
 
 ### Gotchas a future agent should know
 - Reward-magnitude tests assert RANGES (e.g. `9 < r < 11`), because
@@ -107,7 +153,12 @@ disposable and regenerate as needed.
 - `_rigged_env()` in tests pins wind AND (post-inertia) `_boat_speed`;
   tests teleport `env._boat_pos` and step once — respect momentum.
 - Trained policies are wed to `NormalizeObservation` ([-1,1] from the env
-  Box bounds): any obs-layout change invalidates old checkpoints.
+  Box bounds): any obs-layout change invalidates old checkpoints. This has
+  already happened once: the randomized-side branch's 9-float obs orphans
+  every 8-obs checkpoint (baseline, baseline-v2).
+- Rule changes invalidate results even when the obs layout survives:
+  `runs/baseline` predates the genuine-rounding rule and is not comparable
+  to anything trained after PR #6.
 - Old `runs/demo` episodes.csv lacks the `oob` column; all CSV readers
   must parse by header name.
 - Subagent worktrees are cut from **main**, not the current branch —
@@ -119,8 +170,11 @@ disposable and regenerate as needed.
 ## 2. Future development plans
 
 ### A. Merge queue and consolidation run (do first)
-Merge order: phase-1 branch → boat-inertia → viz/ablation branches (any
-order). Then retrain a fresh reference policy under the merged physics:
+`docs-chart-guide` and `randomized-rounding-side` are pushed with PRs
+pending (docs merges trivially; randomized-side is tested + already has a
+trained demo policy in `runs/baseline-v3`). Then the older branches, in
+order: phase-1 branch → boat-inertia → viz/ablation branches (any
+order) — all four predate PR #6, so expect env/test conflicts. Then retrain a fresh reference policy under the merged physics:
 `python train.py --run-name reference --total-steps 2000000
 --eps-decay-steps 500000 --buffer-size 200000` and re-run
 `analysis/wind_sweep.py` + `analysis/value_map.py` on it. This becomes the
